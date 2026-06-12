@@ -473,10 +473,6 @@ int main(int argc, char *argv[])
         cmd_log();
     else if (cmd == "status")
         cmd_status();
-    else if (cmd == "sha1test")
-    {
-        std::cout << sha1("hello") << "\n";
-    }
     else
         std::cout << "Unknown command: " << cmd << "\n";
 
