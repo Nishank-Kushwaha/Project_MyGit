@@ -50,18 +50,6 @@ std::string current_timestamp()
     return s;
 }
 
-// Read HEAD -> returns current commit id, or "" if no commits yet
-std::string get_head()
-{
-    return read_file(".my_git/HEAD");
-}
-
-// Update HEAD to point to a new commit id
-void set_head(const std::string &commit_id)
-{
-    write_file(".my_git/HEAD", commit_id);
-}
-
 // Compare both files and return weather both are equal or not
 bool files_equal(const fs::path &a, const fs::path &b)
 {
@@ -143,13 +131,60 @@ std::string sha1(const std::string &input)
     return std::string(buf);
 }
 
+// Returns "refs/main", "refs/feature", etc. if HEAD is symbolic; "" if detached
+std::string get_current_branch_ref()
+{
+    std::string head_content = read_file(".my_git/HEAD");
+    if (head_content.rfind("ref: ", 0) == 0)
+    {
+        std::string ref = head_content.substr(5);
+        // trim trailing newline/whitespace
+        while (!ref.empty() && (ref.back() == '\n' || ref.back() == '\r'))
+            ref.pop_back();
+        return ref;
+    }
+    return ""; // detached HEAD
+}
+
+// Resolves HEAD all the way down to a commit hash
+std::string get_head_commit()
+{
+    std::string ref = get_current_branch_ref();
+    if (!ref.empty())
+    {
+        return read_file(fs::path(".my_git") / ref); // e.g. .my_git/refs/main
+    }
+    // Detached: HEAD contains the commit hash directly
+    std::string h = read_file(".my_git/HEAD");
+    while (!h.empty() && (h.back() == '\n' || h.back() == '\r'))
+        h.pop_back();
+    return h;
+}
+
+// Updates wherever HEAD currently points (branch ref, or HEAD itself if detached)
+void set_head_commit(const std::string &commit_hash)
+{
+    std::string ref = get_current_branch_ref();
+    if (!ref.empty())
+    {
+        write_file(fs::path(".my_git") / ref, commit_hash);
+    }
+    else
+    {
+        write_file(".my_git/HEAD", commit_hash);
+    }
+}
+
 // Initialize my_git
 void cmd_init()
 {
     fs::create_directories(".my_git/commits");
     fs::create_directories(".my_git/staging");
-    std::ofstream(".my_git/HEAD").close();
-    std::ofstream(".my_git/index").close();
+    fs::create_directories(".my_git/refs");
+    write_file(".my_git/HEAD", "ref: refs/main");
+    if (!fs::exists(".my_git/refs/main"))
+        write_file(".my_git/refs/main", "");
+    write_file(".my_git/index", "");
     std::cout << "Initialized empty my_git repository\n";
 }
 
@@ -199,7 +234,7 @@ void cmd_commit(const std::string &message)
         return;
     }
 
-    std::string parent = get_head();
+    std::string parent = get_head_commit();
     std::string timestamp = current_timestamp();
 
     // --- Build the full snapshot content first (in memory) ---
@@ -266,7 +301,7 @@ void cmd_commit(const std::string &message)
     write_file(commit_dir / "metadata", metadata);
 
     // Update HEAD
-    set_head(new_id);
+    set_head_commit(new_id);
 
     // Clear staging area and index
     for (const auto &filename : staged)
@@ -281,7 +316,7 @@ void cmd_commit(const std::string &message)
 
 void cmd_log()
 {
-    std::string current = get_head();
+    std::string current = get_head_commit();
 
     if (current.empty())
     {
@@ -317,7 +352,7 @@ void cmd_log()
 void cmd_status()
 {
     auto staged = read_lines(".my_git/index");
-    std::string head = get_head();
+    std::string head = get_head_commit();
 
     // --- Section 1: Staged files ---
     std::cout << "Staged for commit:\n";
@@ -437,6 +472,90 @@ void cmd_status()
         std::cout << "  (none)\n";
 }
 
+void cmd_branch(const std::string &name)
+{
+    fs::path ref_path = fs::path(".my_git/refs") / name;
+
+    if (fs::exists(ref_path))
+    {
+        std::cout << "Error: branch '" << name << "' already exists\n";
+        return;
+    }
+
+    std::string current_commit = get_head_commit();
+    write_file(ref_path, current_commit);
+    std::cout << "Created branch '" << name << "' at " << current_commit.substr(0, 7) << "\n";
+}
+
+void cmd_checkout(const std::string &name)
+{
+    fs::path ref_path = fs::path(".my_git/refs") / name;
+    fs::path commit_path = fs::path(".my_git/commits") / name;
+
+    std::string target_commit;
+    bool is_branch = fs::exists(ref_path);
+    bool is_commit = fs::exists(commit_path);
+
+    if (is_branch)
+    {
+        target_commit = read_file(ref_path);
+    }
+    else if (is_commit)
+    {
+        target_commit = name; // raw hash, detached HEAD
+    }
+    else
+    {
+        std::cout << "Error: '" << name << "' is not a known branch or commit\n";
+        return;
+    }
+
+    std::string current_commit = get_head_commit();
+
+    // --- Remove files tracked by current commit but NOT in target commit ---
+    if (!current_commit.empty())
+    {
+        fs::path current_files = fs::path(".my_git/commits") / current_commit / "files";
+        if (fs::exists(current_files))
+        {
+            for (const auto &entry : fs::directory_iterator(current_files))
+            {
+                std::string filename = entry.path().filename().string();
+                fs::path target_file = fs::path(".my_git/commits") / target_commit / "files" / filename;
+                if (!fs::exists(target_file))
+                {
+                    fs::remove(filename);
+                }
+            }
+        }
+    }
+
+    // --- Restore files from target commit's snapshot ---
+    fs::path target_files = fs::path(".my_git/commits") / target_commit / "files";
+    if (fs::exists(target_files))
+    {
+        for (const auto &entry : fs::directory_iterator(target_files))
+        {
+            fs::copy_file(entry.path(), entry.path().filename(),
+                          fs::copy_options::overwrite_existing);
+        }
+    }
+
+    // --- Update HEAD ---
+    if (is_branch)
+    {
+        write_file(".my_git/HEAD", "ref: refs/" + name);
+        std::cout << "Switched to branch '" << name << "'\n";
+    }
+    else
+    {
+        write_file(".my_git/HEAD", target_commit); // raw hash = detached
+        std::cout << "Note: switching to '" << target_commit.substr(0, 7) << "'.\n";
+        std::cout << "You are in 'detached HEAD' state. Any new commits made now\n";
+        std::cout << "may not belong to any branch.\n";
+    }
+}
+
 int main(int argc, char *argv[])
 {
     if (argc < 2)
@@ -473,6 +592,24 @@ int main(int argc, char *argv[])
         cmd_log();
     else if (cmd == "status")
         cmd_status();
+    else if (cmd == "branch")
+    {
+        if (argc < 3)
+        {
+            std::cout << "Usage: my_git branch <name>\n";
+            return 1;
+        }
+        cmd_branch(argv[2]);
+    }
+    else if (cmd == "checkout")
+    {
+        if (argc < 3)
+        {
+            std::cout << "Usage: my_git checkout <name>\n";
+            return 1;
+        }
+        cmd_checkout(argv[2]);
+    }
     else
         std::cout << "Unknown command: " << cmd << "\n";
 
