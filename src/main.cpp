@@ -556,6 +556,32 @@ void cmd_checkout(const std::string &name)
     }
 }
 
+void cmd_branch_list()
+{
+    std::string current_ref = get_current_branch_ref(); // e.g. "refs/main", or "" if detached
+
+    for (const auto &entry : fs::directory_iterator(".my_git/refs"))
+    {
+        std::string branch_name = entry.path().filename().string();
+        std::string this_ref = "refs/" + branch_name;
+
+        if (this_ref == current_ref)
+        {
+            std::cout << "* " << branch_name << "\n";
+        }
+        else
+        {
+            std::cout << "  " << branch_name << "\n";
+        }
+    }
+
+    if (current_ref.empty())
+    {
+        std::string head_hash = get_head_commit();
+        std::cout << "* (HEAD detached at " << head_hash.substr(0, 7) << ")\n";
+    }
+}
+
 int main(int argc, char *argv[])
 {
     if (argc < 2)
@@ -596,10 +622,12 @@ int main(int argc, char *argv[])
     {
         if (argc < 3)
         {
-            std::cout << "Usage: my_git branch <name>\n";
-            return 1;
+            cmd_branch_list();
         }
-        cmd_branch(argv[2]);
+        else
+        {
+            cmd_branch(argv[2]);
+        }
     }
     else if (cmd == "checkout")
     {
