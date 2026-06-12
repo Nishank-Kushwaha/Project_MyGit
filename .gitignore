@@ -1,0 +1,4 @@
+build/
+.my_git/
+*.exe
+*.obj
