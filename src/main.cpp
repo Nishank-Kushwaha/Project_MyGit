@@ -902,7 +902,20 @@ int main(int argc, char *argv[])
     if (cmd == "init")
         cmd_init();
     else if (cmd == "help")
-        std::cout << "Commands: init, add, commit, log, status\n";
+    {
+        std::cout << "my_git - a simplified version control system\n\n";
+        std::cout << "Commands:\n";
+        std::cout << "  init      Create empty repository\n";
+        std::cout << "  add       Stage file for commit\n";
+        std::cout << "  commit    Save staged changes permanently\n";
+        std::cout << "  log       Show commit history (linear)\n";
+        std::cout << "  status    Show staged/modified/untracked files\n";
+        std::cout << "  branch    Create or list branches\n";
+        std::cout << "  checkout  Switch branch or commit\n";
+        std::cout << "  diff      Compare two commit snapshots\n";
+        std::cout << "  merge     Combine another branch's changes\n";
+        std::cout << "  graph     Display commit DAG with branches\n";
+    }
     else if (cmd == "graph")
         cmd_graph();
     else if (cmd == "add")
@@ -964,6 +977,21 @@ int main(int argc, char *argv[])
             return 1;
         }
         cmd_merge(argv[2]);
+    }
+    else if (cmd == "selftest")
+    {
+        std::cout << "SHA1(\"hello\") = " << sha1("hello") << "\n";
+
+        std::vector<std::string> a = {"Hello World", "Line2", "Line3"};
+        std::vector<std::string> b = {"Hello Git", "Line2", "Line3"};
+        auto dp = build_lcs_table(a, b);
+        std::cout << "LCS length test = " << dp[dp.size() - 1][dp[0].size() - 1] << "\n";
+
+        if (fs::exists(".my_git/refs/main") && fs::exists(".my_git/refs/feature"))
+        {
+            std::string base = find_merge_base(read_file(".my_git/refs/main"), read_file(".my_git/refs/feature"));
+            std::cout << "Merge base test = " << base.substr(0, 7) << "\n";
+        }
     }
     else
         std::cout << "Unknown command: " << cmd << "\n";
