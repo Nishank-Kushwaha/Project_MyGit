@@ -312,6 +312,67 @@ std::string get_file_at_commit(const std::string &commit_hash, const std::string
     return fs::exists(p) ? read_file(p) : "";
 }
 
+// Returns the path for a given remote name, or "" if not found
+std::string get_remote_url(const std::string &name)
+{
+    std::string config = read_file(".my_git/config");
+    std::istringstream iss(config);
+    std::string line;
+    std::string prefix = "remote." + name + ".url=";
+    while (std::getline(iss, line))
+    {
+        if (line.rfind(prefix, 0) == 0)
+            return line.substr(prefix.size());
+    }
+    return "";
+}
+
+// Copies commit folder hash + all its ancestors from src_root/.my_git to dst_root/.my_git
+// Returns the number of NEW commit objects copied
+int copy_commits_recursive(const fs::path &src_root, const fs::path &dst_root, const std::string &start_hash)
+{
+    int copied = 0;
+    std::string current = start_hash;
+
+    while (!current.empty())
+    {
+        fs::path src_commit = src_root / ".my_git/commits" / current;
+        fs::path dst_commit = dst_root / ".my_git/commits" / current;
+
+        if (fs::exists(dst_commit))
+        {
+            // Already present in destination -> its ancestors must already be there too, stop
+            break;
+        }
+
+        // Copy the entire commit folder (files/ + metadata)
+        fs::create_directories(dst_commit);
+        fs::copy(src_commit, dst_commit, fs::copy_options::recursive | fs::copy_options::overwrite_existing);
+        copied++;
+
+        // Read parent(s) to continue walking
+        std::string metadata = read_file(src_commit / "metadata");
+        std::istringstream iss(metadata);
+        std::string line, parent, parent2;
+        while (std::getline(iss, line))
+        {
+            if (line.rfind("parent2:", 0) == 0)
+                parent2 = line.substr(9);
+            else if (line.rfind("parent:", 0) == 0)
+                parent = line.substr(8);
+        }
+
+        // Recurse for second parent (merge commits) separately
+        if (!parent2.empty())
+        {
+            copied += copy_commits_recursive(src_root, dst_root, parent2);
+        }
+
+        current = parent; // continue main chain
+    }
+    return copied;
+}
+
 // Initialize my_git
 void cmd_init()
 {
@@ -893,6 +954,71 @@ void cmd_merge(const std::string &branch_name)
     }
 }
 
+void cmd_remote_add(const std::string &name, const std::string &path)
+{
+    std::string config = read_file(".my_git/config");
+    config += "remote." + name + ".url=" + path + "\n";
+    write_file(".my_git/config", config);
+    std::cout << "Added remote '" << name << "' -> " << path << "\n";
+}
+
+void cmd_push(const std::string &remote_name, const std::string &branch_name)
+{
+    std::string remote_path = get_remote_url(remote_name);
+    if (remote_path.empty())
+    {
+        std::cout << "Error: remote '" << remote_name << "' not found\n";
+        return;
+    }
+
+    fs::path remote_root = remote_path;
+    if (!fs::exists(remote_root / ".my_git"))
+    {
+        std::cout << "Error: '" << remote_path << "' is not a my_git repository\n";
+        return;
+    }
+
+    fs::path local_ref = fs::path(".my_git/refs") / branch_name;
+    if (!fs::exists(local_ref))
+    {
+        std::cout << "Error: branch '" << branch_name << "' does not exist locally\n";
+        return;
+    }
+
+    std::string local_hash = read_file(local_ref);
+    fs::path remote_ref = remote_root / ".my_git/refs" / branch_name;
+
+    // Fast-forward check
+    if (fs::exists(remote_ref))
+    {
+        std::string remote_hash = read_file(remote_ref);
+
+        if (!remote_hash.empty())
+        { // <-- NEW: only check if remote actually has a commit
+            if (remote_hash == local_hash)
+            {
+                std::cout << "Already up to date.\n";
+                return;
+            }
+            std::set<std::string> local_ancestors = get_ancestors(local_hash);
+            if (!local_ancestors.count(remote_hash))
+            {
+                std::cout << "Error: push rejected (non-fast-forward). Remote has commits you don't have.\n";
+                return;
+            }
+        }
+    }
+
+    // Copy missing commit objects
+    int copied = copy_commits_recursive(".", remote_root, local_hash);
+
+    // Update remote's ref
+    write_file(remote_ref, local_hash);
+
+    std::cout << "Pushed '" << branch_name << "' to '" << remote_name << "' ("
+              << copied << " new commit object(s))\n";
+}
+
 int main(int argc, char *argv[])
 {
     if (argc < 2)
@@ -981,6 +1107,24 @@ int main(int argc, char *argv[])
             return 1;
         }
         cmd_merge(argv[2]);
+    }
+    else if (cmd == "remote")
+    {
+        if (argc < 5 || std::string(argv[2]) != "add")
+        {
+            std::cout << "Usage: my_git remote add <name> <path>\n";
+            return 1;
+        }
+        cmd_remote_add(argv[3], argv[4]);
+    }
+    else if (cmd == "push")
+    {
+        if (argc < 4)
+        {
+            std::cout << "Usage: my_git push <remote> <branch>\n";
+            return 1;
+        }
+        cmd_push(argv[2], argv[3]);
     }
     else if (cmd == "selftest")
     {
