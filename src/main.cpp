@@ -411,6 +411,8 @@ void cmd_graph()
     std::cout << "\nBranches:\n";
     for (const auto &entry : fs::directory_iterator(".my_git/refs"))
     {
+        if (!entry.is_regular_file())
+            continue; // <-- skip "remotes/" subfolder
         std::string branch = entry.path().filename().string();
         std::string h = read_file(entry.path());
         std::cout << "  " << branch << " -> " << h.substr(0, 7) << "\n";
@@ -807,6 +809,8 @@ void cmd_branch_list()
 
     for (const auto &entry : fs::directory_iterator(".my_git/refs"))
     {
+        if (!entry.is_regular_file())
+            continue; // <-- skip "remotes/" subfolder
         std::string branch_name = entry.path().filename().string();
         std::string this_ref = "refs/" + branch_name;
 
@@ -1019,6 +1023,76 @@ void cmd_push(const std::string &remote_name, const std::string &branch_name)
               << copied << " new commit object(s))\n";
 }
 
+void cmd_fetch(const std::string &remote_name)
+{
+    std::string remote_path = get_remote_url(remote_name);
+    if (remote_path.empty())
+    {
+        std::cout << "Error: remote '" << remote_name << "' not found\n";
+        return;
+    }
+
+    fs::path remote_root = remote_path;
+    if (!fs::exists(remote_root / ".my_git"))
+    {
+        std::cout << "Error: '" << remote_path << "' is not a my_git repository\n";
+        return;
+    }
+
+    fs::path remote_refs_dir = remote_root / ".my_git/refs";
+    fs::path local_tracking_dir = fs::path(".my_git/refs/remotes") / remote_name;
+    fs::create_directories(local_tracking_dir);
+
+    int total_copied = 0;
+    int branches_updated = 0;
+
+    for (const auto &entry : fs::directory_iterator(remote_refs_dir))
+    {
+        if (!entry.is_regular_file())
+            continue; // skip "remotes" subfolder if present
+
+        std::string branch_name = entry.path().filename().string();
+        std::string remote_hash = read_file(entry.path());
+        if (remote_hash.empty())
+            continue; // empty branch, nothing to fetch
+
+        // Copy missing commit objects FROM remote TO local
+        total_copied += copy_commits_recursive(remote_root, ".", remote_hash);
+
+        // Update local remote-tracking ref
+        fs::path tracking_ref = local_tracking_dir / branch_name;
+        std::string old_hash = fs::exists(tracking_ref) ? read_file(tracking_ref) : "";
+        if (old_hash != remote_hash)
+        {
+            write_file(tracking_ref, remote_hash);
+            branches_updated++;
+            std::cout << "  " << remote_name << "/" << branch_name
+                      << "  " << (old_hash.empty() ? "(new)" : old_hash.substr(0, 7))
+                      << " -> " << remote_hash.substr(0, 7) << "\n";
+        }
+    }
+
+    std::cout << "Fetched from '" << remote_name << "': " << branches_updated
+              << " branch(es) updated, " << total_copied << " new commit object(s)\n";
+}
+
+void cmd_pull(const std::string &remote_name, const std::string &branch_name)
+{
+    std::cout << "Pulling from '" << remote_name << "'...\n";
+    cmd_fetch(remote_name);
+
+    std::string tracking_ref = "remotes/" + remote_name + "/" + branch_name;
+
+    if (!fs::exists(fs::path(".my_git/refs") / tracking_ref))
+    {
+        std::cout << "Error: nothing to merge (no tracking ref for '" << tracking_ref << "')\n";
+        return;
+    }
+
+    std::cout << "\nMerging " << tracking_ref << " into current branch...\n";
+    cmd_merge(tracking_ref);
+}
+
 int main(int argc, char *argv[])
 {
     if (argc < 2)
@@ -1125,6 +1199,24 @@ int main(int argc, char *argv[])
             return 1;
         }
         cmd_push(argv[2], argv[3]);
+    }
+    else if (cmd == "fetch")
+    {
+        if (argc < 3)
+        {
+            std::cout << "Usage: my_git fetch <remote>\n";
+            return 1;
+        }
+        cmd_fetch(argv[2]);
+    }
+    else if (cmd == "pull")
+    {
+        if (argc < 4)
+        {
+            std::cout << "Usage: my_git pull <remote> <branch>\n";
+            return 1;
+        }
+        cmd_pull(argv[2], argv[3]);
     }
     else if (cmd == "selftest")
     {
