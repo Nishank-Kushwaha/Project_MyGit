@@ -6,6 +6,7 @@
 #include <chrono>
 #include <ctime>
 #include <sstream>
+#include <set>
 
 namespace fs = std::filesystem;
 
@@ -213,6 +214,7 @@ std::vector<std::vector<int>> build_lcs_table(const std::vector<std::string> &a,
     return dp;
 }
 
+// Get the differentiating lines
 std::vector<DiffLine> diff_lines(const std::vector<std::string> &a, const std::vector<std::string> &b)
 {
     auto dp = build_lcs_table(a, b);
@@ -255,6 +257,61 @@ std::vector<DiffLine> diff_lines(const std::vector<std::string> &a, const std::v
     return result;
 }
 
+// Find the ancestor's list
+std::set<std::string> get_ancestors(const std::string &commit_hash)
+{
+    std::set<std::string> ancestors;
+    std::string current = commit_hash;
+
+    while (!current.empty())
+    {
+        ancestors.insert(current);
+        std::string metadata = read_file(fs::path(".my_git/commits") / current / "metadata");
+        std::istringstream iss(metadata);
+        std::string line, parent;
+        while (std::getline(iss, line))
+        {
+            if (line.rfind("parent:", 0) == 0)
+                parent = line.substr(8);
+        }
+        current = parent;
+    }
+    return ancestors;
+}
+
+// Find the Least Comman Ancestor
+std::string find_merge_base(const std::string &ours, const std::string &theirs)
+{
+    std::set<std::string> ours_ancestors = get_ancestors(ours);
+
+    std::string current = theirs;
+    while (!current.empty())
+    {
+        if (ours_ancestors.count(current))
+            return current;
+
+        std::string metadata = read_file(fs::path(".my_git/commits") / current / "metadata");
+        std::istringstream iss(metadata);
+        std::string line, parent;
+        while (std::getline(iss, line))
+        {
+            if (line.rfind("parent:", 0) == 0)
+                parent = line.substr(8);
+        }
+        current = parent;
+    }
+    return "";
+}
+
+// Returns content of a file in a given commit's snapshot ("" if file doesn't exist there)
+std::string get_file_at_commit(const std::string &commit_hash, const std::string &filename)
+{
+    if (commit_hash.empty())
+        return "";
+    fs::path p = fs::path(".my_git/commits") / commit_hash / "files" / filename;
+    return fs::exists(p) ? read_file(p) : "";
+}
+
 // Initialize my_git
 void cmd_init()
 {
@@ -266,6 +323,33 @@ void cmd_init()
         write_file(".my_git/refs/main", "");
     write_file(".my_git/index", "");
     std::cout << "Initialized empty my_git repository\n";
+}
+
+// Visualisation of current 'DAG'
+void cmd_graph()
+{
+    for (const auto &entry : fs::directory_iterator(".my_git/commits"))
+    {
+        std::string hash = entry.path().filename().string();
+        std::string metadata = read_file(entry.path() / "metadata");
+        std::istringstream iss(metadata);
+        std::string line, parent;
+        while (std::getline(iss, line))
+        {
+            if (line.rfind("parent:", 0) == 0)
+                parent = line.substr(8);
+        }
+        std::cout << "* " << hash.substr(0, 7) << "  parent="
+                  << (parent.empty() ? "-" : parent.substr(0, 7)) << "\n";
+    }
+
+    std::cout << "\nBranches:\n";
+    for (const auto &entry : fs::directory_iterator(".my_git/refs"))
+    {
+        std::string branch = entry.path().filename().string();
+        std::string h = read_file(entry.path());
+        std::cout << "  " << branch << " -> " << h.substr(0, 7) << "\n";
+    }
 }
 
 void cmd_add(const std::string &filename)
@@ -317,12 +401,19 @@ void cmd_commit(const std::string &message)
     std::string parent = get_head_commit();
     std::string timestamp = current_timestamp();
 
-    // --- Build the full snapshot content first (in memory) ---
-    // We need this to know what to hash AND what to write to disk
+    // --- NEW: check for a pending merge (second parent) ---
+    std::string parent2;
+    bool is_merge = fs::exists(".my_git/MERGE_HEAD");
+    if (is_merge)
+    {
+        parent2 = read_file(".my_git/MERGE_HEAD");
+        while (!parent2.empty() && (parent2.back() == '\n' || parent2.back() == '\r'))
+            parent2.pop_back();
+    }
 
-    // Step A: figure out the final set of files (parent's files + staged overlays)
-    std::vector<std::string> all_files;    // filenames in final snapshot
-    std::vector<std::string> all_contents; // matching contents
+    // --- Build the full snapshot content first (in memory) ---
+    std::vector<std::string> all_files;
+    std::vector<std::string> all_contents;
 
     if (!parent.empty())
     {
@@ -358,8 +449,8 @@ void cmd_commit(const std::string &message)
         }
     }
 
-    // --- Build hash input: metadata + all file contents (sorted for determinism) ---
-    std::string hash_input = "message: " + message + "\n" + "timestamp: " + timestamp + "\n" + "parent: " + parent + "\n";
+    // --- Build hash input: metadata + all file contents ---
+    std::string hash_input = "message: " + message + "\n" + "timestamp: " + timestamp + "\n" + "parent: " + parent + "\n" + "parent2: " + parent2 + "\n"; // NEW
     for (size_t i = 0; i < all_files.size(); ++i)
     {
         hash_input += all_files[i] + ":" + all_contents[i] + "\n";
@@ -377,7 +468,7 @@ void cmd_commit(const std::string &message)
     }
 
     // Write metadata
-    std::string metadata = "message: " + message + "\n" + "timestamp: " + timestamp + "\n" + "parent: " + parent + "\n";
+    std::string metadata = "message: " + message + "\n" + "timestamp: " + timestamp + "\n" + "parent: " + parent + "\n" + "parent2: " + parent2 + "\n"; // NEW
     write_file(commit_dir / "metadata", metadata);
 
     // Update HEAD
@@ -391,7 +482,16 @@ void cmd_commit(const std::string &message)
     }
     write_file(".my_git/index", "");
 
-    std::cout << "[commit " << new_id.substr(0, 7) << "] " << message << "\n";
+    // NEW: clear the pending merge marker
+    if (is_merge)
+    {
+        fs::remove(".my_git/MERGE_HEAD");
+        std::cout << "[merge commit " << new_id.substr(0, 7) << "] " << message << "\n";
+    }
+    else
+    {
+        std::cout << "[commit " << new_id.substr(0, 7) << "] " << message << "\n";
+    }
 }
 
 void cmd_log()
@@ -710,6 +810,85 @@ void cmd_diff(const std::string &hash1, const std::string &hash2)
     }
 }
 
+void cmd_merge(const std::string &branch_name)
+{
+    fs::path ref_path = fs::path(".my_git/refs") / branch_name;
+    if (!fs::exists(ref_path))
+    {
+        std::cout << "Error: branch '" << branch_name << "' does not exist\n";
+        return;
+    }
+
+    std::string ours = get_head_commit();
+    std::string theirs = read_file(ref_path);
+    std::string base = find_merge_base(ours, theirs);
+
+    write_file(".my_git/MERGE_HEAD", theirs);
+
+    std::cout << "Merging '" << branch_name << "' into current branch\n";
+    std::cout << "Base: " << base.substr(0, 7) << "  Ours: " << ours.substr(0, 7)
+              << "  Theirs: " << theirs.substr(0, 7) << "\n\n";
+
+    // Collect union of filenames across all 3 snapshots
+    std::set<std::string> all_files;
+    for (auto *h : {&base, &ours, &theirs})
+    {
+        fs::path dir = fs::path(".my_git/commits") / *h / "files";
+        if (fs::exists(dir))
+            for (const auto &entry : fs::directory_iterator(dir))
+                all_files.insert(entry.path().filename().string());
+    }
+
+    bool any_conflict = false;
+
+    for (const auto &filename : all_files)
+    {
+        std::string base_content = get_file_at_commit(base, filename);
+        std::string ours_content = get_file_at_commit(ours, filename);
+        std::string theirs_content = get_file_at_commit(theirs, filename);
+
+        if (ours_content == theirs_content)
+        {
+            // Identical on both sides (or both unchanged) -> nothing to do
+            continue;
+        }
+        if (base_content == ours_content)
+        {
+            // Only 'theirs' changed -> take theirs
+            write_file(filename, theirs_content);
+            std::cout << "Updated (from " << branch_name << "): " << filename << "\n";
+            continue;
+        }
+        if (base_content == theirs_content)
+        {
+            // Only 'ours' changed -> keep ours (already in working dir, but ensure it's written)
+            write_file(filename, ours_content);
+            std::cout << "Kept (ours): " << filename << "\n";
+            continue;
+        }
+
+        // Both changed -> CONFLICT
+        any_conflict = true;
+        std::string merged = "<<<<<<< HEAD\n" + ours_content + "=======\n" + theirs_content + ">>>>>>> " + branch_name + "\n";
+        write_file(filename, merged);
+        std::cout << "CONFLICT: " << filename << "\n";
+    }
+
+    if (any_conflict)
+    {
+        std::cout << "\nAutomatic merge failed; fix conflicts, then run:\n";
+        std::cout << "  my_git add <file>\n";
+        std::cout << "  my_git commit \"merge message\"\n";
+    }
+    else
+    {
+        std::cout << "\nMerge successful (no conflicts). Run:\n";
+        std::cout << "  my_git add <file>\n";
+        std::cout << "  my_git commit \"merge message\"\n";
+        std::cout << "to record the merge commit.\n";
+    }
+}
+
 int main(int argc, char *argv[])
 {
     if (argc < 2)
@@ -724,6 +903,8 @@ int main(int argc, char *argv[])
         cmd_init();
     else if (cmd == "help")
         std::cout << "Commands: init, add, commit, log, status\n";
+    else if (cmd == "graph")
+        cmd_graph();
     else if (cmd == "add")
     {
         if (argc < 3)
@@ -774,6 +955,15 @@ int main(int argc, char *argv[])
             return 1;
         }
         cmd_diff(argv[2], argv[3]);
+    }
+    else if (cmd == "merge")
+    {
+        if (argc < 3)
+        {
+            std::cout << "Usage: my_git merge <branch>\n";
+            return 1;
+        }
+        cmd_merge(argv[2]);
     }
     else
         std::cout << "Unknown command: " << cmd << "\n";
