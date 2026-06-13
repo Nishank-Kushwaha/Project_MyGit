@@ -1,1 +1,1 @@
-Hello Git
+Changed on main and conflict-test (resolved)
