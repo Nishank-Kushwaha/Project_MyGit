@@ -333,14 +333,18 @@ void cmd_graph()
         std::string hash = entry.path().filename().string();
         std::string metadata = read_file(entry.path() / "metadata");
         std::istringstream iss(metadata);
-        std::string line, parent;
+        std::string line, parent, parent2;
         while (std::getline(iss, line))
         {
-            if (line.rfind("parent:", 0) == 0)
+            if (line.rfind("parent2:", 0) == 0)
+                parent2 = line.substr(9);
+            else if (line.rfind("parent:", 0) == 0)
                 parent = line.substr(8);
         }
+
+        std::string p2_label = parent2.empty() ? "" : ("  parent2=" + parent2.substr(0, 7));
         std::cout << "* " << hash.substr(0, 7) << "  parent="
-                  << (parent.empty() ? "-" : parent.substr(0, 7)) << "\n";
+                  << (parent.empty() ? "-" : parent.substr(0, 7)) << p2_label << "\n";
     }
 
     std::cout << "\nBranches:\n";
