@@ -9,6 +9,12 @@
 
 namespace fs = std::filesystem;
 
+struct DiffLine
+{
+    char type; // ' ' = unchanged, '-' = removed, '+' = added
+    std::string text;
+};
+
 // Read entire file content as a string
 std::string read_file(const fs::path &p)
 {
@@ -173,6 +179,80 @@ void set_head_commit(const std::string &commit_hash)
     {
         write_file(".my_git/HEAD", commit_hash);
     }
+}
+
+// Split file content into lines
+std::vector<std::string> split_lines(const std::string &content)
+{
+    std::vector<std::string> lines;
+    std::istringstream iss(content);
+    std::string line;
+    while (std::getline(iss, line))
+    {
+        lines.push_back(line);
+    }
+    return lines;
+}
+
+// Build the LCS table
+std::vector<std::vector<int>> build_lcs_table(const std::vector<std::string> &a, const std::vector<std::string> &b)
+{
+    int n = a.size(), m = b.size();
+    std::vector<std::vector<int>> dp(n + 1, std::vector<int>(m + 1, 0));
+
+    for (int i = 1; i <= n; i++)
+    {
+        for (int j = 1; j <= m; j++)
+        {
+            if (a[i - 1] == b[j - 1])
+                dp[i][j] = dp[i - 1][j - 1] + 1;
+            else
+                dp[i][j] = std::max(dp[i - 1][j], dp[i][j - 1]);
+        }
+    }
+    return dp;
+}
+
+std::vector<DiffLine> diff_lines(const std::vector<std::string> &a, const std::vector<std::string> &b)
+{
+    auto dp = build_lcs_table(a, b);
+    std::vector<DiffLine> result;
+
+    int n = a.size(), m = b.size();
+    int i = n, j = m;
+
+    while (i > 0 && j > 0)
+    {
+        if (a[i - 1] == b[j - 1])
+        {
+            result.push_back({' ', a[i - 1]});
+            i--;
+            j--;
+        }
+        else if (dp[i - 1][j] > dp[i][j - 1])
+        {
+            result.push_back({'-', a[i - 1]});
+            i--;
+        }
+        else
+        {
+            result.push_back({'+', b[j - 1]});
+            j--;
+        }
+    }
+    while (i > 0)
+    {
+        result.push_back({'-', a[i - 1]});
+        i--;
+    }
+    while (j > 0)
+    {
+        result.push_back({'+', b[j - 1]});
+        j--;
+    }
+
+    std::reverse(result.begin(), result.end());
+    return result;
 }
 
 // Initialize my_git
@@ -582,6 +662,54 @@ void cmd_branch_list()
     }
 }
 
+void cmd_diff(const std::string &hash1, const std::string &hash2)
+{
+    fs::path files1 = fs::path(".my_git/commits") / hash1 / "files";
+    fs::path files2 = fs::path(".my_git/commits") / hash2 / "files";
+
+    if (!fs::exists(files1) || !fs::exists(files2))
+    {
+        std::cout << "Error: one or both commit hashes not found\n";
+        return;
+    }
+
+    // Collect union of filenames across both snapshots
+    std::vector<std::string> all_filenames;
+    for (const auto &entry : fs::directory_iterator(files1))
+        all_filenames.push_back(entry.path().filename().string());
+    for (const auto &entry : fs::directory_iterator(files2))
+    {
+        std::string fname = entry.path().filename().string();
+        if (std::find(all_filenames.begin(), all_filenames.end(), fname) == all_filenames.end())
+            all_filenames.push_back(fname);
+    }
+    std::sort(all_filenames.begin(), all_filenames.end());
+
+    for (const auto &fname : all_filenames)
+    {
+        std::string old_content = read_file(files1 / fname); // "" if file didn't exist
+        std::string new_content = read_file(files2 / fname);
+
+        if (old_content == new_content)
+            continue; // no change in this file
+
+        std::cout << "diff --my_git a/" << fname << " b/" << fname << "\n";
+
+        auto a = split_lines(old_content);
+        auto b = split_lines(new_content);
+        auto diff = diff_lines(a, b);
+
+        for (const auto &dl : diff)
+        {
+            if (dl.type == ' ')
+                std::cout << "  " << dl.text << "\n";
+            else
+                std::cout << dl.type << " " << dl.text << "\n";
+        }
+        std::cout << "\n";
+    }
+}
+
 int main(int argc, char *argv[])
 {
     if (argc < 2)
@@ -637,6 +765,15 @@ int main(int argc, char *argv[])
             return 1;
         }
         cmd_checkout(argv[2]);
+    }
+    else if (cmd == "diff")
+    {
+        if (argc < 4)
+        {
+            std::cout << "Usage: my_git diff <hash1> <hash2>\n";
+            return 1;
+        }
+        cmd_diff(argv[2], argv[3]);
     }
     else
         std::cout << "Unknown command: " << cmd << "\n";
