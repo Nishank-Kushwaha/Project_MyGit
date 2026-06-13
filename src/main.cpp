@@ -7,6 +7,7 @@
 #include <ctime>
 #include <sstream>
 #include <set>
+#include <iomanip>
 
 namespace fs = std::filesystem;
 
@@ -386,7 +387,6 @@ void cmd_init()
     std::cout << "Initialized empty my_git repository\n";
 }
 
-// Visualisation of current 'DAG'
 void cmd_graph()
 {
     for (const auto &entry : fs::directory_iterator(".my_git/commits"))
@@ -1107,18 +1107,33 @@ int main(int argc, char *argv[])
         cmd_init();
     else if (cmd == "help")
     {
-        std::cout << "my_git - a simplified version control system\n\n";
-        std::cout << "Commands:\n";
-        std::cout << "  init      Create empty repository\n";
-        std::cout << "  add       Stage file for commit\n";
-        std::cout << "  commit    Save staged changes permanently\n";
-        std::cout << "  log       Show commit history (linear)\n";
-        std::cout << "  status    Show staged/modified/untracked files\n";
-        std::cout << "  branch    Create or list branches\n";
-        std::cout << "  checkout  Switch branch or commit\n";
-        std::cout << "  diff      Compare two commit snapshots\n";
-        std::cout << "  merge     Combine another branch's changes\n";
-        std::cout << "  graph     Display commit DAG with branches\n";
+        std::cout << "my_git - a simplified version control system\n";
+        std::cout << "Usage: my_git <command> [<args>]\n";
+        std::cout << "These are the available my_git commands:\n\n";
+
+        std::vector<std::pair<std::string, std::string>> commands = {
+            {"init", "Create empty repository"},
+            {"add", "Stage file for commit"},
+            {"commit", "Save staged changes permanently"},
+            {"log", "Show commit history (linear)"},
+            {"status", "Show staged/modified/untracked files"},
+            {"branch", "Create or list branches"},
+            {"checkout", "Switch branch or commit"},
+            {"diff", "Compare two commit snapshots"},
+            {"merge", "Combine another branch's changes"},
+            {"graph", "Display commit DAG with branches"},
+            {"remote", "Add a remote repository"},
+            {"push", "Send local commits to a remote"},
+            {"fetch", "Download commits from a remote"},
+            {"pull", "Fetch and merge from a remote"},
+        };
+
+        for (const auto &[name, desc] : commands)
+        {
+            std::cout << "  " << std::left << std::setw(10) << name << desc << "\n";
+        }
+
+        std::cout << "\nRun 'my_git <command>' with no arguments to see usage details (if applicable).\n";
     }
     else if (cmd == "graph")
         cmd_graph();
