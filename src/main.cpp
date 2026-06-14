@@ -1661,11 +1661,15 @@ int main(int argc, char *argv[])
             {"push", "Send local commits to a remote"},
             {"fetch", "Download commits from a remote"},
             {"pull", "Fetch and merge from a remote"},
+            {"hash-object", "Compute and store a blob object"},
+            {"cat-file", "Print contents of an object"},
+            {"write-tree", "Build a tree object from directory"},
+            {"ls-tree", "List entries of a tree object"},
         };
 
         for (const auto &[name, desc] : commands)
         {
-            std::cout << "  " << std::left << std::setw(10) << name << desc << "\n";
+            std::cout << "  " << std::left << std::setw(15) << name << desc << "\n";
         }
 
         std::cout << "\nRun 'my_git <command>' with no arguments to see usage details (if applicable).\n";
