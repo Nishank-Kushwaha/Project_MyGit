@@ -381,6 +381,30 @@ int copy_commits_recursive(const fs::path &src_root, const fs::path &dst_root, c
     return copied;
 }
 
+// Real Git's object storage layout: .my_git/objects/<first 2 hex chars>/<remaining 38 hex chars>
+std::string write_object(const std::string &content, const std::string &type)
+{
+    std::string header = type + " " + std::to_string(content.size()) + '\0' + content;
+    std::string hash = sha1(header);
+
+    fs::path obj_dir = fs::path(".my_git/objects") / hash.substr(0, 2);
+    fs::path obj_path = obj_dir / hash.substr(2);
+
+    if (!fs::exists(obj_path))
+    {
+        fs::create_directories(obj_dir);
+        write_file(obj_path, header);
+    }
+    return hash;
+}
+
+// Returns the FULL stored content (including "<type> <size>\0" header)
+std::string read_object(const std::string &hash)
+{
+    fs::path obj_path = fs::path(".my_git/objects") / hash.substr(0, 2) / hash.substr(2);
+    return read_file(obj_path);
+}
+
 // Initialize my_git
 void cmd_init()
 {
@@ -1455,6 +1479,36 @@ void cmd_pull(const std::string &remote_name, const std::string &branch_name)
     cmd_merge(tracking_ref);
 }
 
+void cmd_hash_object(const std::string &filename)
+{
+    if (!fs::exists(filename))
+    {
+        std::cout << "Error: file '" << filename << "' does not exist\n";
+        return;
+    }
+    std::string content = read_file(filename);
+    std::string hash = write_object(content, "blob");
+    std::cout << hash << "\n";
+}
+
+void cmd_cat_file(const std::string &hash)
+{
+    std::string raw = read_object(hash);
+    if (raw.empty())
+    {
+        std::cout << "Error: object '" << hash << "' not found\n";
+        return;
+    }
+    // Strip "<type> <size>\0" header
+    size_t null_pos = raw.find('\0');
+    if (null_pos == std::string::npos)
+    {
+        std::cout << "Error: malformed object\n";
+        return;
+    }
+    std::cout << raw.substr(null_pos + 1);
+}
+
 int main(int argc, char *argv[])
 {
     if (argc < 2)
@@ -1594,6 +1648,25 @@ int main(int argc, char *argv[])
             return 1;
         }
         cmd_pull(argv[2], argv[3]);
+    }
+    else if (cmd == "hash-object")
+    {
+        if (argc < 3)
+        {
+            std::cout << "Usage: my_git hash-object <file>\n";
+            return 1;
+        }
+        cmd_hash_object(argv[2]);
+    }
+    else if (cmd == "cat-file")
+    {
+        // Usage: my_git cat-file -p <hash>
+        if (argc < 4 || std::string(argv[2]) != "-p")
+        {
+            std::cout << "Usage: my_git cat-file -p <hash>\n";
+            return 1;
+        }
+        cmd_cat_file(argv[3]);
     }
     else if (cmd == "selftest")
     {
