@@ -491,6 +491,67 @@ std::string write_tree(const fs::path &dir_path)
     return write_object(tree_content, "tree");
 }
 
+std::map<std::string, std::string> load_tree_recursive(const std::string &tree_hash)
+{
+    std::map<std::string, std::string> result; // path -> content
+
+    std::string raw = read_object(tree_hash);
+    if (raw.empty())
+        return result;
+
+    size_t null_pos = raw.find('\0');
+    std::string tree_content = raw.substr(null_pos + 1);
+
+    std::istringstream iss(tree_content);
+    std::string line;
+    while (std::getline(iss, line))
+    {
+        if (line.empty())
+            continue;
+        // format: "<mode> <type> <hash> <name>"
+        std::istringstream ls(line);
+        std::string mode, type, hash, name;
+        ls >> mode >> type >> hash;
+        std::getline(ls, name); // rest of line (handles spaces in filenames)
+        if (!name.empty() && name[0] == ' ')
+            name = name.substr(1);
+
+        if (type == "blob")
+        {
+            std::string blob_raw = read_object(hash);
+            size_t bn = blob_raw.find('\0');
+            result[name] = blob_raw.substr(bn + 1);
+        }
+        else if (type == "tree")
+        {
+            // Recurse into subdirectory (forward-compatible; current trees are flat)
+            auto sub = load_tree_recursive(hash);
+            for (auto &[subpath, content] : sub)
+                result[name + "/" + subpath] = content;
+        }
+    }
+    return result;
+}
+
+std::map<std::string, std::string> reconstruct_commit(const std::string &commit_hash)
+{
+    std::string metadata = read_file(fs::path(".my_git/commits") / commit_hash / "metadata");
+    std::istringstream iss(metadata);
+    std::string line, tree_hash;
+    while (std::getline(iss, line))
+    {
+        if (line.rfind("tree:", 0) == 0)
+        {
+            tree_hash = line.substr(6);
+            while (!tree_hash.empty() && (tree_hash.back() == '\n' || tree_hash.back() == '\r' || tree_hash.back() == ' '))
+                tree_hash.pop_back();
+        }
+    }
+    if (tree_hash.empty())
+        return {};
+    return load_tree_recursive(tree_hash);
+}
+
 // Initialize my_git
 void cmd_init()
 {
@@ -1803,6 +1864,30 @@ int main(int argc, char *argv[])
             return 1;
         }
         cmd_ls_tree(argv[2]);
+    }
+    else if (cmd == "verify-objects")
+    {
+        int total = 0, ok = 0;
+        for (const auto &entry : fs::directory_iterator(".my_git/commits"))
+        {
+            std::string hash = entry.path().filename().string();
+            auto reconstructed = reconstruct_commit(hash);
+
+            fs::path files_dir = entry.path() / "files";
+            std::map<std::string, std::string> from_files;
+            for (const auto &f : fs::directory_iterator(files_dir))
+                from_files[f.path().filename().string()] = read_file(f.path());
+
+            total++;
+            bool match = (reconstructed == from_files);
+            if (match)
+                ok++;
+            std::cout << (match ? "[PASS] " : "[FAIL] ") << hash.substr(0, 7)
+                      << "  (" << reconstructed.size() << " files via objects, "
+                      << from_files.size() << " via files/)\n";
+        }
+        std::cout << "\n"
+                  << ok << "/" << total << " commits verified\n";
     }
     else if (cmd == "selftest")
     {
