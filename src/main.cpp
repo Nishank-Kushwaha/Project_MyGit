@@ -463,6 +463,34 @@ std::string read_object(const std::string &hash)
     return header + content; // same return format as before (header + content)
 }
 
+// Builds a tree object representing all regular files directly inside `dir_path`.
+// Returns the tree object's hash.
+std::string write_tree(const fs::path &dir_path)
+{
+    std::vector<std::pair<std::string, std::string>> entries; // (filename, blob_hash)
+
+    for (const auto &entry : fs::directory_iterator(dir_path))
+    {
+        if (!entry.is_regular_file())
+            continue;
+        std::string filename = entry.path().filename().string();
+        std::string content = read_file(entry.path());
+        std::string blob_hash = write_object(content, "blob");
+        entries.push_back({filename, blob_hash});
+    }
+
+    // Sort by filename for determinism (same set of files -> same tree hash)
+    std::sort(entries.begin(), entries.end());
+
+    std::string tree_content;
+    for (auto &[name, hash] : entries)
+    {
+        tree_content += "100644 blob " + hash + " " + name + "\n";
+    }
+
+    return write_object(tree_content, "tree");
+}
+
 // Initialize my_git
 void cmd_init()
 {
@@ -1567,6 +1595,24 @@ void cmd_cat_file(const std::string &hash)
     std::cout << raw.substr(null_pos + 1);
 }
 
+void cmd_write_tree()
+{
+    std::string hash = write_tree(".");
+    std::cout << hash << "\n";
+}
+
+void cmd_ls_tree(const std::string &hash)
+{
+    std::string raw = read_object(hash);
+    if (raw.empty())
+    {
+        std::cout << "Error: object '" << hash << "' not found\n";
+        return;
+    }
+    size_t null_pos = raw.find('\0');
+    std::cout << raw.substr(null_pos + 1); // print entries as-is
+}
+
 int main(int argc, char *argv[])
 {
     if (argc < 2)
@@ -1725,6 +1771,19 @@ int main(int argc, char *argv[])
             return 1;
         }
         cmd_cat_file(argv[3]);
+    }
+    else if (cmd == "write-tree")
+    {
+        cmd_write_tree();
+    }
+    else if (cmd == "ls-tree")
+    {
+        if (argc < 3)
+        {
+            std::cout << "Usage: my_git ls-tree <hash>\n";
+            return 1;
+        }
+        cmd_ls_tree(argv[2]);
     }
     else if (cmd == "selftest")
     {
