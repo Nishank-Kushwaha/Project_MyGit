@@ -988,8 +988,23 @@ void cmd_commit(const std::string &message)
         }
     }
 
+    // NEW: build a tree object for this snapshot (Phase 7)
+    std::vector<std::pair<std::string, std::string>> tree_entries;
+    for (size_t i = 0; i < all_files.size(); ++i)
+    {
+        std::string blob_hash = write_object(all_contents[i], "blob");
+        tree_entries.push_back({all_files[i], blob_hash});
+    }
+    std::sort(tree_entries.begin(), tree_entries.end());
+
+    std::string tree_content;
+    for (auto &[name, hash] : tree_entries)
+        tree_content += "100644 blob " + hash + " " + name + "\n";
+
+    std::string tree_hash = write_object(tree_content, "tree");
+
     // --- Build hash input: metadata + all file contents ---
-    std::string hash_input = "message: " + message + "\n" + "timestamp: " + timestamp + "\n" + "parent: " + parent + "\n" + "parent2: " + parent2 + "\n"; // NEW
+    std::string hash_input = "message: " + message + "\n" + "timestamp: " + timestamp + "\n" + "parent: " + parent + "\n" + "parent2: " + parent2 + "\n" + "tree: " + tree_hash + "\n"; // NEW
     for (size_t i = 0; i < all_files.size(); ++i)
     {
         hash_input += all_files[i] + ":" + all_contents[i] + "\n";
@@ -1007,7 +1022,7 @@ void cmd_commit(const std::string &message)
     }
 
     // Write metadata
-    std::string metadata = "message: " + message + "\n" + "timestamp: " + timestamp + "\n" + "parent: " + parent + "\n" + "parent2: " + parent2 + "\n"; // NEW
+    std::string metadata = "message: " + message + "\n" + "timestamp: " + timestamp + "\n" + "parent: " + parent + "\n" + "parent2: " + parent2 + "\n" + "tree: " + tree_hash + "\n"; // NEW
     write_file(commit_dir / "metadata", metadata);
 
     // Update HEAD
