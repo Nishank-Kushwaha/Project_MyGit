@@ -10,6 +10,7 @@
 #include <iomanip>
 #include <map>
 #include <queue>
+#include <zlib.h>
 
 namespace fs = std::filesystem;
 
@@ -381,11 +382,40 @@ int copy_commits_recursive(const fs::path &src_root, const fs::path &dst_root, c
     return copied;
 }
 
-// Real Git's object storage layout: .my_git/objects/<first 2 hex chars>/<remaining 38 hex chars>
+// Compress a string using zlib's deflate
+std::string zlib_compress(const std::string &input)
+{
+    uLongf bound = compressBound(input.size());
+    std::vector<uint8_t> out(bound);
+
+    int res = compress2(out.data(), &bound,
+                        reinterpret_cast<const uint8_t *>(input.data()), input.size(),
+                        Z_BEST_COMPRESSION);
+    if (res != Z_OK)
+        return ""; // shouldn't happen for in-memory buffers
+
+    return std::string(reinterpret_cast<char *>(out.data()), bound);
+}
+
+// Decompress a zlib-compressed string. original_size must be known ahead of time.
+std::string zlib_decompress(const std::string &compressed, size_t original_size)
+{
+    std::vector<uint8_t> out(original_size);
+    uLongf out_len = original_size;
+
+    int res = uncompress(out.data(), &out_len,
+                         reinterpret_cast<const uint8_t *>(compressed.data()), compressed.size());
+    if (res != Z_OK)
+        return "";
+
+    return std::string(reinterpret_cast<char *>(out.data()), out_len);
+}
+
 std::string write_object(const std::string &content, const std::string &type)
 {
-    std::string header = type + " " + std::to_string(content.size()) + '\0' + content;
-    std::string hash = sha1(header);
+    std::string header = type + " " + std::to_string(content.size()) + '\0';
+    std::string full = header + content;
+    std::string hash = sha1(full);
 
     fs::path obj_dir = fs::path(".my_git/objects") / hash.substr(0, 2);
     fs::path obj_path = obj_dir / hash.substr(2);
@@ -393,16 +423,42 @@ std::string write_object(const std::string &content, const std::string &type)
     if (!fs::exists(obj_path))
     {
         fs::create_directories(obj_dir);
-        write_file(obj_path, header);
+        std::string compressed_body = zlib_compress(content);
+        // Store: header (uncompressed) + 4-byte compressed-length + compressed body
+        std::string to_write = header;
+        uint32_t comp_len = (uint32_t)compressed_body.size();
+        to_write.append(reinterpret_cast<char *>(&comp_len), 4);
+        to_write += compressed_body;
+        write_file(obj_path, to_write);
     }
     return hash;
 }
 
-// Returns the FULL stored content (including "<type> <size>\0" header)
 std::string read_object(const std::string &hash)
 {
     fs::path obj_path = fs::path(".my_git/objects") / hash.substr(0, 2) / hash.substr(2);
-    return read_file(obj_path);
+    std::string raw = read_file(obj_path);
+    if (raw.empty())
+        return "";
+
+    size_t null_pos = raw.find('\0');
+    if (null_pos == std::string::npos)
+        return "";
+
+    std::string header = raw.substr(0, null_pos + 1); // "<type> <size>\0"
+
+    // Parse original content size from header
+    size_t space_pos = header.find(' ');
+    size_t orig_size = std::stoul(header.substr(space_pos + 1, null_pos - space_pos - 1));
+
+    // Read compressed length (4 bytes after header)
+    uint32_t comp_len;
+    memcpy(&comp_len, raw.data() + null_pos + 1, 4);
+
+    std::string compressed_body = raw.substr(null_pos + 1 + 4, comp_len);
+    std::string content = zlib_decompress(compressed_body, orig_size);
+
+    return header + content; // same return format as before (header + content)
 }
 
 // Initialize my_git
