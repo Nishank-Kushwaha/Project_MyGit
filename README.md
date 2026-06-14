@@ -1,6 +1,6 @@
 # my_git
 
-A simplified, **from-scratch** implementation of Git's core internals, written in C++17/20. `my_git` re-implements staging, content-addressable commits (with a hand-written SHA-1), branching, an LCS-based diff engine, three-way merging with conflict detection, and local-path remotes (push/fetch/pull) — without wrapping or calling the real `git` binary.
+A simplified, **from-scratch** implementation of Git's core internals, written in C++20. `my_git` re-implements staging, content-addressable commits (with a hand-written SHA-1), branching, an LCS-based diff engine, three-way merging with conflict detection, and local-path remotes (push/fetch/pull) — without wrapping or calling the real `git` binary.
 
 This project was built incrementally, phase by phase, as a systems-programming exercise covering file I/O, hashing, graph algorithms, and dynamic programming.
 
@@ -19,6 +19,7 @@ This project was built incrementally, phase by phase, as a systems-programming e
   - [Diff Engine (LCS)](#4-diff-engine-lcs)
   - [Three-Way Merge & Conflict Detection](#5-three-way-merge--conflict-detection)
   - [Remotes (Push / Fetch / Pull)](#6-remotes-push--fetch--pull)
+  - [Commit Graph Visualization (Multi-Lane ASCII DAG)](#7-commit-graph-visualization-multi-lane-ascii-dag)
 - [Example Walkthrough](#example-walkthrough)
 - [Known Limitations](#known-limitations)
 - [Possible Future Work](#possible-future-work)
@@ -35,7 +36,7 @@ This project was built incrementally, phase by phase, as a systems-programming e
 | **Diffing**       | `diff <hash1> <hash2>` using an LCS-based line diff (`-`/`+` output)                                             |
 | **Merging**       | `merge <branch>` — merge-base detection, three-way merge, auto-merge, conflict markers, two-parent merge commits |
 | **Distributed**   | `remote add`, `push`, `fetch`, `pull` between local repositories                                                 |
-| **Visualization** | `graph` — prints the commit DAG with parent/parent2 pointers                                                     |
+| **Visualization** | `graph` — multi-lane ASCII DAG with merge connectors, branch labels, and `HEAD` marker                           |
 
 ---
 
@@ -78,7 +79,7 @@ my_git branch [<name>]            List branches, or create a new one
 my_git checkout <branch|hash>     Switch branch, or detach HEAD at a commit
 my_git diff <hash1> <hash2>       Compare two commit snapshots (LCS diff)
 my_git merge <branch>             Three-way merge another branch into current
-my_git graph                      Show the commit DAG (hash + parent pointers)
+my_git graph                      Show a multi-lane ASCII commit DAG
 my_git remote add <name> <path>   Register a local-path remote
 my_git push <remote> <branch>     Push a branch to a remote (fast-forward only)
 my_git fetch <remote>             Download new commits into remote-tracking refs
@@ -172,6 +173,16 @@ A "remote" is simply **another folder containing its own `.my_git/`** — no net
 - **`fetch`**: same object-copying logic in reverse, storing results under `refs/remotes/<remote>/<branch>` without touching local branches or the working directory.
 - **`pull`**: `fetch` followed by `merge refs/remotes/<remote>/<branch>` — reusing the exact same three-way merge machinery from local merges.
 
+### 7. Commit Graph Visualization (Multi-Lane ASCII DAG)
+
+`my_git graph` now renders a true terminal DAG view instead of listing only parent pointers:
+
+1. Commits are loaded from `.my_git/commits/*/metadata` and topologically ordered (Kahn's algorithm), with timestamp-priority tie-breaking for tip ordering.
+2. Lanes are assigned dynamically so independent branches, merges, and lane fold-backs remain readable.
+3. Per-lane live ranges are computed to draw clean vertical continuity (`|`) across rows.
+4. Connector rows render merge and transition geometry with `\\`, `/`, and `_`.
+5. Each commit row includes short hash, message, branch labels, and a `HEAD` marker when applicable.
+
 ---
 
 ## Example Walkthrough
@@ -195,16 +206,18 @@ my_git commit "Merge feature into main"
 my_git graph
 ```
 
-`graph` output shows the resulting DAG:
+`graph` output shows the resulting DAG as an ASCII lane graph:
 
 ```
-* <hash-A>  parent=-
-* <hash-B>  parent=<hash-A>
-* <hash-C>  parent=<hash-A>
-* <hash-D>  parent=<hash-B>  parent2=<hash-C>
+*  <hash-D> (HEAD) [main]  "Merge feature into main"
+|\
+| *  <hash-C> [feature]    "add feature"
+* |  <hash-B>              "main-side change"
+|/
+*  <hash-A>                "first commit"
 Branches:
-  feature -> <hash-C>
-  main    -> <hash-D>
+  main             -> <hash-D>
+  feature          -> <hash-C>
 ```
 
 ---
@@ -213,7 +226,7 @@ Branches:
 
 - Tested with ASCII text files; binary file handling is untested.
 - No `.gitignore`-style ignore rules — `status` uses a hardcoded skip-list for `my_git`'s own files.
-- `graph` prints a flat list with parent pointers rather than a true multi-lane ASCII graph (rendering branch/merge lanes visually is a significant undertaking on its own).
+- `graph` is terminal-ASCII only (no colors/interactive zoom), so very wide histories can become visually dense.
 - Single-file `main.cpp` — not yet split into modular headers/sources.
 - `push`/`pull` operate on local filesystem paths only; no network transport (HTTP/SSH).
 
@@ -221,11 +234,11 @@ Branches:
 
 - **Object database refactor**: split snapshots into individual content-addressed `blob`/`tree`/`commit` objects (with de-duplication at the file level) plus `hash-object`/`cat-file`/`ls-tree` commands.
 - Modularize into `include/` + `src/` with separate headers for hashing, diffing, merging, and repository operations.
-- Multi-lane ASCII/graphical DAG visualization.
+- Optional colored graph output and pager integration for large histories.
 - Automated unit tests (SHA-1 test vectors, LCS correctness, merge scenarios).
 
 ---
 
 ## Tech Stack
 
-C++17/20 · `std::filesystem` · `fstream` · `unordered_map`/`map`/`set` · CMake
+C++20 · `std::filesystem` · `fstream` · `unordered_map`/`map`/`set` · CMake
