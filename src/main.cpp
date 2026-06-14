@@ -411,6 +411,7 @@ std::string zlib_decompress(const std::string &compressed, size_t original_size)
     return std::string(reinterpret_cast<char *>(out.data()), out_len);
 }
 
+// Real Git's object storage layout: .my_git/objects/<first 2 hex chars>/<remaining 38 hex chars>
 std::string write_object(const std::string &content, const std::string &type)
 {
     std::string header = type + " " + std::to_string(content.size()) + '\0';
@@ -434,6 +435,7 @@ std::string write_object(const std::string &content, const std::string &type)
     return hash;
 }
 
+// Returns the FULL stored content (including "<type> <size>\0" header)
 std::string read_object(const std::string &hash)
 {
     fs::path obj_path = fs::path(".my_git/objects") / hash.substr(0, 2) / hash.substr(2);
