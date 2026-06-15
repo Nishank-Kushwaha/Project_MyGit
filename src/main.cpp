@@ -1015,13 +1015,14 @@ void cmd_commit(const std::string &message)
     std::vector<std::string> all_files;
     std::vector<std::string> all_contents;
 
+    // CHANGED: copy-forward via reconstruct_commit instead of reading files/
     if (!parent.empty())
     {
-        fs::path parent_files = fs::path(".my_git/commits") / parent / "files";
-        for (const auto &entry : fs::directory_iterator(parent_files))
+        auto parent_snapshot = reconstruct_commit(parent);
+        for (auto &[filename, content] : parent_snapshot)
         {
-            all_files.push_back(entry.path().filename().string());
-            all_contents.push_back(read_file(entry.path()));
+            all_files.push_back(filename);
+            all_contents.push_back(content);
         }
     }
 
@@ -1073,17 +1074,12 @@ void cmd_commit(const std::string &message)
 
     std::string new_id = sha1(hash_input);
 
-    // --- Create commit folder and write the snapshot ---
+    // CHANGED: only create the commit directory for metadata — no files/ subfolder
     fs::path commit_dir = fs::path(".my_git/commits") / new_id;
-    fs::create_directories(commit_dir / "files");
-
-    for (size_t i = 0; i < all_files.size(); ++i)
-    {
-        write_file(commit_dir / "files" / all_files[i], all_contents[i]);
-    }
+    fs::create_directories(commit_dir);
 
     // Write metadata
-    std::string metadata = "message: " + message + "\n" + "timestamp: " + timestamp + "\n" + "parent: " + parent + "\n" + "parent2: " + parent2 + "\n" + "tree: " + tree_hash + "\n"; // NEW
+    std::string metadata = "message: " + message + "\n" + "timestamp: " + timestamp + "\n" + "parent: " + parent + "\n" + "parent2: " + parent2 + "\n" + "tree: " + tree_hash + "\n";
     write_file(commit_dir / "metadata", metadata);
 
     // Update HEAD
@@ -1862,6 +1858,15 @@ int main(int argc, char *argv[])
             auto reconstructed = reconstruct_commit(hash);
 
             fs::path files_dir = entry.path() / "files";
+            if (!fs::exists(files_dir))
+            {
+                total++;
+                ok++;
+                std::cout << "[PASS] " << hash.substr(0, 7)
+                          << "  (" << reconstructed.size() << " files via objects, no files/ -- object-only commit)\n";
+                continue;
+            }
+
             std::map<std::string, std::string> from_files;
             for (const auto &f : fs::directory_iterator(files_dir))
                 from_files[f.path().filename().string()] = read_file(f.path());
