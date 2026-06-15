@@ -25,6 +25,8 @@ struct CommitInfo
     std::string hash, parent, parent2, message, timestamp;
 };
 
+// ------------------------------------ All the helper functions ---------------------------
+
 // Read entire file content as a string
 std::string read_file(const fs::path &p)
 {
@@ -491,6 +493,8 @@ std::string write_tree(const fs::path &dir_path)
     return write_object(tree_content, "tree");
 }
 
+// Recursively loads a tree object and reconstructs its full file snapshot.
+// Returns a map of "path -> file contents".
 std::map<std::string, std::string> load_tree_recursive(const std::string &tree_hash)
 {
     std::map<std::string, std::string> result; // path -> content
@@ -533,6 +537,8 @@ std::map<std::string, std::string> load_tree_recursive(const std::string &tree_h
     return result;
 }
 
+// Reconstructs a commit snapshot entirely from its tree/blob objects.
+// Returns a map of "path -> file contents" for the commit.
 std::map<std::string, std::string> reconstruct_commit(const std::string &commit_hash)
 {
     std::string metadata = read_file(fs::path(".my_git/commits") / commit_hash / "metadata");
@@ -552,6 +558,7 @@ std::map<std::string, std::string> reconstruct_commit(const std::string &commit_
     return load_tree_recursive(tree_hash);
 }
 
+// Removes trailing newlines, carriage returns, and spaces from a string.
 std::string trim_nl(std::string s)
 {
     while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' '))
@@ -559,6 +566,7 @@ std::string trim_nl(std::string s)
     return s;
 }
 
+// Checks whether an object with the given SHA-1 hash exists in .my_git/objects.
 bool object_exists(const std::string &hash)
 {
     if (hash.empty())
@@ -600,6 +608,8 @@ void check_tree_recursive(const std::string &tree_hash, int &errors)
     }
 }
 
+// Runs repository integrity checks: validates commit parents, tree references,
+// blob/tree object existence, and branch refs. Returns total error count.
 int run_fsck_checks()
 {
     int errors = 0;
@@ -659,7 +669,8 @@ int run_fsck_checks()
     return errors;
 }
 
-// Initialize my_git
+// ------------------------------------ All the available commands ---------------------------
+
 void cmd_init()
 {
     fs::create_directories(".my_git/commits");
