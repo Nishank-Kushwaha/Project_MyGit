@@ -1149,6 +1149,11 @@ void cmd_status()
     auto staged = read_lines(".my_git/index");
     std::string head = get_head_commit();
 
+    // NEW: reconstruct HEAD's snapshot from objects instead of reading files/
+    std::map<std::string, std::string> head_snapshot;
+    if (!head.empty())
+        head_snapshot = reconstruct_commit(head);
+
     // --- Section 1: Staged files ---
     std::cout << "Staged for commit:\n";
     if (staged.empty())
@@ -1188,13 +1193,7 @@ void cmd_status()
             }
         }
 
-        bool in_last_commit = false;
-        if (!head.empty())
-        {
-            fs::path committed = fs::path(".my_git/commits") / head / "files" / filename;
-            if (fs::exists(committed))
-                in_last_commit = true;
-        }
+        bool in_last_commit = head_snapshot.count(filename) > 0; // CHANGED
 
         if (is_staged)
         {
@@ -1207,8 +1206,8 @@ void cmd_status()
         }
         else if (in_last_commit)
         {
-            fs::path committed_copy = fs::path(".my_git/commits") / head / "files" / filename;
-            if (!files_equal(entry.path(), committed_copy))
+            std::string working_content = read_file(entry.path());
+            if (working_content != head_snapshot[filename]) // CHANGED: in-memory compare
             {
                 std::cout << "  " << filename << "\n";
                 any_modified = true;
@@ -1248,13 +1247,7 @@ void cmd_status()
         }
 
         // Was it part of the last commit?
-        bool in_last_commit = false;
-        if (!head.empty())
-        {
-            fs::path committed = fs::path(".my_git/commits") / head / "files" / filename;
-            if (fs::exists(committed))
-                in_last_commit = true;
-        }
+        bool in_last_commit = head_snapshot.count(filename) > 0; // CHANGED
 
         if (!is_staged && !in_last_commit)
         {
