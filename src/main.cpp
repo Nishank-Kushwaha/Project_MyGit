@@ -669,6 +669,50 @@ int run_fsck_checks()
     return errors;
 }
 
+// Builds a (possibly nested) tree object from a flat map of path -> content.
+// Paths may contain '/' for subdirectories (e.g. "src/main.cpp").
+std::string build_tree_from_map(const std::map<std::string, std::string> &files)
+{
+    // Group entries: top-level files go directly into this tree;
+    // entries with '/' get grouped by their first path component.
+    std::vector<std::pair<std::string, std::string>> tree_entries;     // (name, "mode type hash")
+    std::map<std::string, std::map<std::string, std::string>> subdirs; // dirname -> {relpath -> content}
+
+    for (auto &[path, content] : files)
+    {
+        size_t slash = path.find('/');
+        if (slash == std::string::npos)
+        {
+            // Top-level file
+            std::string blob_hash = write_object(content, "blob");
+            tree_entries.push_back({path, "100644 blob " + blob_hash});
+        }
+        else
+        {
+            // Belongs to a subdirectory
+            std::string dirname = path.substr(0, slash);
+            std::string rest = path.substr(slash + 1);
+            subdirs[dirname][rest] = content;
+        }
+    }
+
+    // Recursively build a tree object for each subdirectory
+    for (auto &[dirname, contents] : subdirs)
+    {
+        std::string subtree_hash = build_tree_from_map(contents);
+        tree_entries.push_back({dirname, "040000 tree " + subtree_hash});
+    }
+
+    // Sort by name for determinism
+    std::sort(tree_entries.begin(), tree_entries.end());
+
+    std::string tree_content;
+    for (auto &[name, mode_type_hash] : tree_entries)
+        tree_content += mode_type_hash + " " + name + "\n";
+
+    return write_object(tree_content, "tree");
+}
+
 // ------------------------------------ All the available commands ---------------------------
 
 void cmd_init()
@@ -2075,6 +2119,14 @@ int main(int argc, char *argv[])
 
         std::cout << "\n"
                   << passed << "/" << total << " checks passed\n";
+
+        // 7. Recursive tree builder from a flat path→content map
+        std::map<std::string, std::string> test_files = {
+            {"file1.txt", "root file"},
+            {"src/main.cpp", "int main(){}"},
+            {"src/utils/helper.cpp", "helper code"}};
+        std::string root_tree = build_tree_from_map(test_files);
+        std::cout << "Root tree: " << root_tree << "\n";
     }
     else
     {
