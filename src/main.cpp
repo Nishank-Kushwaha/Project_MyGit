@@ -1851,7 +1851,9 @@ int main(int argc, char *argv[])
     std::string cmd = argv[1];
 
     if (cmd == "init")
+    {
         cmd_init();
+    }
     else if (cmd == "help")
     {
         std::cout << "my_git - a simplified version control system\n";
@@ -1887,7 +1889,9 @@ int main(int argc, char *argv[])
         std::cout << "\nRun 'my_git <command>' with no arguments to see usage details (if applicable).\n";
     }
     else if (cmd == "graph")
+    {
         cmd_graph();
+    }
     else if (cmd == "add")
     {
         if (argc < 3)
@@ -1907,9 +1911,13 @@ int main(int argc, char *argv[])
         cmd_commit(argv[2]);
     }
     else if (cmd == "log")
+    {
         cmd_log();
+    }
     else if (cmd == "status")
+    {
         cmd_status();
+    }
     else if (cmd == "branch")
     {
         if (argc < 3)
@@ -2050,9 +2058,13 @@ int main(int argc, char *argv[])
                   << ok << "/" << total << " commits verified\n";
     }
     else if (cmd == "fsck")
+    {
         cmd_fsck();
+    }
     else if (cmd == "cleanup-snapshots")
+    {
         cmd_cleanup_snapshots();
+    }
     else if (cmd == "selftest")
     {
         int passed = 0, total = 0;
@@ -2117,7 +2129,9 @@ int main(int argc, char *argv[])
                   << passed << "/" << total << " checks passed\n";
     }
     else
+    {
         std::cout << "Unknown command: " << cmd << "\n";
+    }
 
     return 0;
 }
