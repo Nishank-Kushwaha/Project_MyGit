@@ -1430,23 +1430,27 @@ void cmd_merge(const std::string &branch_name)
     std::cout << "Base: " << base.substr(0, 7) << "  Ours: " << ours.substr(0, 7)
               << "  Theirs: " << theirs.substr(0, 7) << "\n\n";
 
-    // Collect union of filenames across all 3 snapshots
+    // CHANGED: reconstruct all three snapshots from objects instead of reading files/
+    auto base_snapshot = base.empty() ? std::map<std::string, std::string>{} : reconstruct_commit(base);
+    auto ours_snapshot = reconstruct_commit(ours);
+    auto theirs_snapshot = reconstruct_commit(theirs);
+
+    // Union of filenames across all 3 snapshots
     std::set<std::string> all_files;
-    for (auto *h : {&base, &ours, &theirs})
-    {
-        fs::path dir = fs::path(".my_git/commits") / *h / "files";
-        if (fs::exists(dir))
-            for (const auto &entry : fs::directory_iterator(dir))
-                all_files.insert(entry.path().filename().string());
-    }
+    for (auto &[name, _] : base_snapshot)
+        all_files.insert(name);
+    for (auto &[name, _] : ours_snapshot)
+        all_files.insert(name);
+    for (auto &[name, _] : theirs_snapshot)
+        all_files.insert(name);
 
     bool any_conflict = false;
 
     for (const auto &filename : all_files)
     {
-        std::string base_content = get_file_at_commit(base, filename);
-        std::string ours_content = get_file_at_commit(ours, filename);
-        std::string theirs_content = get_file_at_commit(theirs, filename);
+        std::string base_content = base_snapshot.count(filename) ? base_snapshot[filename] : "";
+        std::string ours_content = ours_snapshot.count(filename) ? ours_snapshot[filename] : "";
+        std::string theirs_content = theirs_snapshot.count(filename) ? theirs_snapshot[filename] : "";
 
         if (ours_content == theirs_content)
         {
