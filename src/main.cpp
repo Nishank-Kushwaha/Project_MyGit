@@ -600,6 +600,65 @@ void check_tree_recursive(const std::string &tree_hash, int &errors)
     }
 }
 
+int run_fsck_checks()
+{
+    int errors = 0;
+
+    for (const auto &entry : fs::directory_iterator(".my_git/commits"))
+    {
+        std::string hash = entry.path().filename().string();
+        std::string metadata = read_file(entry.path() / "metadata");
+        std::istringstream iss(metadata);
+        std::string line, parent, parent2, tree;
+        while (std::getline(iss, line))
+        {
+            if (line.rfind("parent2:", 0) == 0)
+                parent2 = trim_nl(line.substr(9));
+            else if (line.rfind("parent:", 0) == 0)
+                parent = trim_nl(line.substr(8));
+            else if (line.rfind("tree:", 0) == 0)
+                tree = trim_nl(line.substr(6));
+        }
+
+        if (tree.empty())
+        {
+            std::cout << "[ERROR] commit " << hash.substr(0, 7) << " has no tree: field\n";
+            errors++;
+        }
+        else
+        {
+            check_tree_recursive(tree, errors);
+        }
+
+        if (!parent.empty() && !fs::exists(fs::path(".my_git/commits") / parent / "metadata"))
+        {
+            std::cout << "[ERROR] commit " << hash.substr(0, 7) << " has dangling parent: " << parent.substr(0, 7) << "\n";
+            errors++;
+        }
+        if (!parent2.empty() && !fs::exists(fs::path(".my_git/commits") / parent2 / "metadata"))
+        {
+            std::cout << "[ERROR] commit " << hash.substr(0, 7) << " has dangling parent2: " << parent2.substr(0, 7) << "\n";
+            errors++;
+        }
+    }
+
+    for (const auto &entry : fs::recursive_directory_iterator(".my_git/refs"))
+    {
+        if (!entry.is_regular_file())
+            continue;
+        std::string hash = trim_nl(read_file(entry.path()));
+        if (hash.empty())
+            continue;
+        if (!fs::exists(fs::path(".my_git/commits") / hash / "metadata"))
+        {
+            std::cout << "[ERROR] ref " << entry.path().string() << " points to missing commit "
+                      << hash.substr(0, 7) << "\n";
+            errors++;
+        }
+    }
+    return errors;
+}
+
 // Initialize my_git
 void cmd_init()
 {
@@ -1723,67 +1782,51 @@ void cmd_ls_tree(const std::string &hash)
 
 void cmd_fsck()
 {
-    int errors = 0;
-
-    // 1. Check every commit: tree exists+valid, parent/parent2 point to real commits
-    for (const auto &entry : fs::directory_iterator(".my_git/commits"))
-    {
-        std::string hash = entry.path().filename().string();
-        std::string metadata = read_file(entry.path() / "metadata");
-        std::istringstream iss(metadata);
-        std::string line, parent, parent2, tree;
-        while (std::getline(iss, line))
-        {
-            if (line.rfind("parent2:", 0) == 0)
-                parent2 = trim_nl(line.substr(9));
-            else if (line.rfind("parent:", 0) == 0)
-                parent = trim_nl(line.substr(8));
-            else if (line.rfind("tree:", 0) == 0)
-                tree = trim_nl(line.substr(6));
-        }
-
-        if (tree.empty())
-        {
-            std::cout << "[ERROR] commit " << hash.substr(0, 7) << " has no tree: field\n";
-            errors++;
-        }
-        else
-        {
-            check_tree_recursive(tree, errors);
-        }
-
-        if (!parent.empty() && !fs::exists(fs::path(".my_git/commits") / parent / "metadata"))
-        {
-            std::cout << "[ERROR] commit " << hash.substr(0, 7) << " has dangling parent: " << parent.substr(0, 7) << "\n";
-            errors++;
-        }
-        if (!parent2.empty() && !fs::exists(fs::path(".my_git/commits") / parent2 / "metadata"))
-        {
-            std::cout << "[ERROR] commit " << hash.substr(0, 7) << " has dangling parent2: " << parent2.substr(0, 7) << "\n";
-            errors++;
-        }
-    }
-
-    // 2. Check every ref (including refs/remotes/.../...) points to a real commit
-    for (const auto &entry : fs::recursive_directory_iterator(".my_git/refs"))
-    {
-        if (!entry.is_regular_file())
-            continue;
-        std::string hash = trim_nl(read_file(entry.path()));
-        if (hash.empty())
-            continue;
-        if (!fs::exists(fs::path(".my_git/commits") / hash / "metadata"))
-        {
-            std::cout << "[ERROR] ref " << entry.path().string() << " points to missing commit "
-                      << hash.substr(0, 7) << "\n";
-            errors++;
-        }
-    }
-
+    int errors = run_fsck_checks();
     if (errors == 0)
         std::cout << "fsck: repository is healthy (0 errors)\n";
     else
         std::cout << "\nfsck: " << errors << " error(s) found\n";
+}
+
+void cmd_cleanup_snapshots()
+{
+    std::cout << "Running integrity check before cleanup...\n";
+    int errors = run_fsck_checks();
+    if (errors > 0)
+    {
+        std::cout << "\nAborting cleanup: " << errors << " integrity error(s) found. Run 'fsck' for details.\n";
+        return;
+    }
+    std::cout << "Repository healthy. Proceeding with cleanup.\n\n";
+
+    int removed = 0, skipped = 0;
+    for (const auto &entry : fs::directory_iterator(".my_git/commits"))
+    {
+        std::string hash = entry.path().filename().string();
+        fs::path files_dir = entry.path() / "files";
+        if (!fs::exists(files_dir))
+            continue;
+
+        auto reconstructed = reconstruct_commit(hash);
+        std::map<std::string, std::string> from_files;
+        for (const auto &f : fs::directory_iterator(files_dir))
+            from_files[f.path().filename().string()] = read_file(f.path());
+
+        if (reconstructed != from_files)
+        {
+            std::cout << "[SKIP] " << hash.substr(0, 7) << " - reconstruction mismatch, not removing\n";
+            skipped++;
+            continue;
+        }
+
+        fs::remove_all(files_dir);
+        removed++;
+    }
+    std::cout << "Removed files/ from " << removed << " commit(s)";
+    if (skipped > 0)
+        std::cout << ", skipped " << skipped;
+    std::cout << "\n";
 }
 
 int main(int argc, char *argv[])
@@ -1997,6 +2040,8 @@ int main(int argc, char *argv[])
     }
     else if (cmd == "fsck")
         cmd_fsck();
+    else if (cmd == "cleanup-snapshots")
+        cmd_cleanup_snapshots();
     else if (cmd == "selftest")
     {
         int passed = 0, total = 0;
