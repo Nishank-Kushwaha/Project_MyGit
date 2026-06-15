@@ -1369,31 +1369,27 @@ void cmd_branch_list()
 
 void cmd_diff(const std::string &hash1, const std::string &hash2)
 {
-    fs::path files1 = fs::path(".my_git/commits") / hash1 / "files";
-    fs::path files2 = fs::path(".my_git/commits") / hash2 / "files";
-
-    if (!fs::exists(files1) || !fs::exists(files2))
+    if (!fs::exists(fs::path(".my_git/commits") / hash1 / "metadata") ||
+        !fs::exists(fs::path(".my_git/commits") / hash2 / "metadata"))
     {
         std::cout << "Error: one or both commit hashes not found\n";
         return;
     }
 
-    // Collect union of filenames across both snapshots
-    std::vector<std::string> all_filenames;
-    for (const auto &entry : fs::directory_iterator(files1))
-        all_filenames.push_back(entry.path().filename().string());
-    for (const auto &entry : fs::directory_iterator(files2))
-    {
-        std::string fname = entry.path().filename().string();
-        if (std::find(all_filenames.begin(), all_filenames.end(), fname) == all_filenames.end())
-            all_filenames.push_back(fname);
-    }
-    std::sort(all_filenames.begin(), all_filenames.end());
+    auto snap1 = reconstruct_commit(hash1); // old
+    auto snap2 = reconstruct_commit(hash2); // new
+
+    // Union of filenames (std::map keeps them sorted already)
+    std::set<std::string> all_filenames;
+    for (auto &[name, _] : snap1)
+        all_filenames.insert(name);
+    for (auto &[name, _] : snap2)
+        all_filenames.insert(name);
 
     for (const auto &fname : all_filenames)
     {
-        std::string old_content = read_file(files1 / fname); // "" if file didn't exist
-        std::string new_content = read_file(files2 / fname);
+        std::string old_content = snap1.count(fname) ? snap1[fname] : ""; // "" if file didn't exist
+        std::string new_content = snap2.count(fname) ? snap2[fname] : ""; // "" if file didn't exist
 
         if (old_content == new_content)
             continue; // no change in this file
