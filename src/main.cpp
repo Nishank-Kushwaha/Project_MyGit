@@ -1800,46 +1800,6 @@ void cmd_fsck()
         std::cout << "\nfsck: " << errors << " error(s) found\n";
 }
 
-void cmd_cleanup_snapshots()
-{
-    std::cout << "Running integrity check before cleanup...\n";
-    int errors = run_fsck_checks();
-    if (errors > 0)
-    {
-        std::cout << "\nAborting cleanup: " << errors << " integrity error(s) found. Run 'fsck' for details.\n";
-        return;
-    }
-    std::cout << "Repository healthy. Proceeding with cleanup.\n\n";
-
-    int removed = 0, skipped = 0;
-    for (const auto &entry : fs::directory_iterator(".my_git/commits"))
-    {
-        std::string hash = entry.path().filename().string();
-        fs::path files_dir = entry.path() / "files";
-        if (!fs::exists(files_dir))
-            continue;
-
-        auto reconstructed = reconstruct_commit(hash);
-        std::map<std::string, std::string> from_files;
-        for (const auto &f : fs::directory_iterator(files_dir))
-            from_files[f.path().filename().string()] = read_file(f.path());
-
-        if (reconstructed != from_files)
-        {
-            std::cout << "[SKIP] " << hash.substr(0, 7) << " - reconstruction mismatch, not removing\n";
-            skipped++;
-            continue;
-        }
-
-        fs::remove_all(files_dir);
-        removed++;
-    }
-    std::cout << "Removed files/ from " << removed << " commit(s)";
-    if (skipped > 0)
-        std::cout << ", skipped " << skipped;
-    std::cout << "\n";
-}
-
 int main(int argc, char *argv[])
 {
     if (argc < 2)
@@ -2028,10 +1988,6 @@ int main(int argc, char *argv[])
     else if (cmd == "fsck")
     {
         cmd_fsck();
-    }
-    else if (cmd == "cleanup-snapshots")
-    {
-        cmd_cleanup_snapshots();
     }
     else if (cmd == "selftest")
     {
