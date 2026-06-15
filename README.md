@@ -2,6 +2,8 @@
 
 A simplified, **from-scratch** implementation of Git's core internals, written in C++20. `my_git` re-implements staging, content-addressable commits (with a hand-written SHA-1), branching, an LCS-based diff engine, three-way merging with conflict detection, local-path remotes (push/fetch/pull), and a real blob/tree/commit object database with zlib compression — without wrapping or calling the real `git` binary.
 
+As of Phase 8, the object database is the **sole storage backend**: `checkout`, `diff`, `merge`, `status`, and `commit` all operate purely on `commit → tree → blob` objects, with no per-commit file snapshots anywhere on disk.
+
 This project was built incrementally, phase by phase, as a systems-programming exercise covering file I/O, hashing, graph algorithms, dynamic programming, and content-addressable storage.
 
 ---
@@ -13,7 +15,7 @@ This project was built incrementally, phase by phase, as a systems-programming e
 - [Command Reference](#command-reference)
 - [Repository Layout](#repository-layout)
 - [Design Decisions & Internals](#design-decisions--internals)
-  - [Full-Snapshot Commit Model](#1-full-snapshot-commit-model)
+  - [Commit Snapshot Model: Full-Snapshot Semantics, Object-Based Storage](#1-commit-snapshot-model-full-snapshot-semantics-object-based-storage)
   - [Content-Addressable Hashing (SHA-1)](#2-content-addressable-hashing-sha-1)
   - [Branches as Pointers + Symbolic HEAD](#3-branches-as-pointers--symbolic-head)
   - [Diff Engine (LCS)](#4-diff-engine-lcs)
@@ -21,6 +23,7 @@ This project was built incrementally, phase by phase, as a systems-programming e
   - [Remotes (Push / Fetch / Pull)](#6-remotes-push--fetch--pull)
   - [Commit Graph Visualization (Multi-Lane ASCII DAG)](#7-commit-graph-visualization-multi-lane-ascii-dag)
   - [Object Database (Blobs, Trees, Compression)](#8-object-database-blobs-trees-compression)
+  - [Object-Based Architecture (Phase 8)](#9-object-based-architecture-phase-8)
 - [Example Walkthrough](#example-walkthrough)
 - [Known Limitations](#known-limitations)
 - [Possible Future Work](#possible-future-work)
@@ -39,6 +42,7 @@ This project was built incrementally, phase by phase, as a systems-programming e
 | **Distributed**   | `remote add`, `push`, `fetch`, `pull` between local repositories                                                                                    |
 | **Visualization** | `graph` — multi-lane ASCII DAG with merge connectors, branch labels, and `HEAD` marker                                                              |
 | **Object DB**     | `hash-object`, `cat-file -p`, `write-tree`, `ls-tree` — real Git-style content-addressed blob/tree objects with zlib compression and de-duplication |
+| **Integrity**     | `fsck` — validates the full commit/tree/blob graph and refs; `selftest` — quick sanity checks including commit→tree→blob traversal of every commit  |
 
 ---
 
@@ -99,6 +103,7 @@ my_git hash-object <file>         Compute a blob hash and store it as an object
 my_git cat-file -p <hash>         Print the decompressed contents of an object
 my_git write-tree                 Build a tree object from the current directory
 my_git ls-tree <hash>             List the entries of a tree object
+my_git fsck                       Validate the commit/tree/blob graph and refs
 ```
 
 ---
@@ -116,8 +121,7 @@ project/
     ├── staging/              # snapshot copies of staged files
     ├── commits/
     │   └── <sha1-hash>/
-    │       ├── files/        # full snapshot of every tracked file at this commit
-    │       └── metadata      # message, timestamp, parent, parent2, tree
+    │       └── metadata     # message, timestamp, parent, parent2, tree (Phase 8: no files/ — see Object-Based Architecture)
     ├── objects/
     │   └── <aa>/
     │       └── <...38 hex chars>   # zlib-compressed "<type> <size>\0<content>"
@@ -133,16 +137,21 @@ project/
 
 ## Design Decisions & Internals
 
-### 1. Full-Snapshot Commit Model
+### 1. Commit Snapshot Model: Full-Snapshot Semantics, Object-Based Storage
 
-Each commit stores a **complete snapshot** of every tracked file under `commits/<hash>/files/` — not just a diff from the parent. When committing:
+Conceptually, every commit represents a **complete snapshot** of every tracked file at that point in time — this hasn't changed since Phase 1. What _has_ changed is **where that snapshot lives**:
 
-1. Copy forward every file from the **parent commit's** snapshot.
-2. Overlay the newly **staged** files (new files are added, changed files overwrite the copied-forward version).
-3. Write the resulting full snapshot to the new commit's `files/` directory.
-4. (Phase 7) Additionally build a **tree object** from the same snapshot and record its hash in `metadata` as `tree: <hash>` — see [Object Database](#8-object-database-blobs-trees-compression).
+- **Phases 1–6**: snapshots were stored as real files under `commits/<hash>/files/`.
+- **Phase 7**: each commit _additionally_ recorded a `tree: <hash>` pointing into a content-addressable object store, alongside the existing `files/` folder.
+- **Phase 8**: `commits/<hash>/files/` was **removed entirely**. Every snapshot is now reconstructed **on demand** from `commit → tree → blob` objects via `reconstruct_commit()`. See [Object-Based Architecture](#9-object-based-architecture-phase-8) for the full migration story.
 
-This makes `status`, `diff`, and `merge` simple — every commit is a self-contained, complete picture of the project, so any two commits can be compared directly without reconstructing history.
+When committing, `cmd_commit` now:
+
+1. Reconstructs the **parent's** snapshot via `reconstruct_commit(parent)` (instead of reading `files/`).
+2. Overlays the newly **staged** files (new files are added, changed files overwrite the inherited version).
+3. Writes a **blob** object for every file in the resulting snapshot, assembles a **tree** object from those blobs, and records `tree: <hash>` in `metadata`.
+
+This makes `status`, `diff`, and `merge` simple — every commit is a self-contained, complete picture of the project (reconstructable purely from objects), so any two commits can be compared directly without walking history.
 
 ### 2. Content-Addressable Hashing (SHA-1)
 
@@ -204,7 +213,7 @@ A "remote" is simply **another folder containing its own `.my_git/`** — no net
 
 ### 8. Object Database (Blobs, Trees, Compression)
 
-Phase 7 adds a genuine Git-style **content-addressable object store** under `.my_git/objects/`, layered _alongside_ the full-snapshot commit model (additive, non-breaking — `log`/`diff`/`merge`/`checkout` are untouched).
+Phase 7 added a genuine Git-style **content-addressable object store** under `.my_git/objects/`. It started out _alongside_ the full-snapshot `files/` model (additive, non-breaking — `log`/`diff`/`merge`/`checkout` were untouched at that point); Phase 8 ([next section](#9-object-based-architecture-phase-8)) then made it the **sole** source of truth and removed `files/` entirely.
 
 **Object format.** Every object is stored as `"<type> <size>\0<content>"`, hashed with SHA-1 — this matches real Git's blob-hashing formula exactly (`sha1("hello") = aaf4c61d...` style). The object is written to `.my_git/objects/<first 2 hex chars>/<remaining 38 hex chars>`, identical to Git's real directory layout.
 
@@ -224,6 +233,45 @@ Phase 7 adds a genuine Git-style **content-addressable object store** under `.my
 **Commits point to trees.** `cmd_commit` builds a blob for every file in the snapshot, assembles a tree object from those blobs, and records the tree's hash in `metadata` as `tree: <hash>` (also folded into the commit's own SHA-1 input). The result is a real `commit → tree → blob` graph.
 
 **De-duplication, verified end-to-end.** Two files with identical content (`file1.txt` and a copy `test_dup.txt`) hash to the _same_ blob and only one object is written to disk. More strikingly, blobs created via plain `hash-object` calls are **reused by `commit`** later — `ls-tree` on a commit's tree shows the _exact same_ blob hashes that `hash-object` produced earlier for `file1.txt`/`file2.txt`, proving the object store is a single shared, de-duplicated pool used by both plumbing and porcelain commands.
+
+### 9. Object-Based Architecture (Phase 8)
+
+Phase 8 is a **core architecture refactor**: every operation that used to read `commits/<hash>/files/` was migrated, one at a time, to reconstruct repository state purely from `commit → tree → blob` objects — and `files/` was then deleted from every commit. The repository is now a real content-addressable object database, exactly like Git's internals.
+
+**The foundation — `load_tree_recursive` and `reconstruct_commit`.**
+
+```cpp
+std::map<std::string, std::string> load_tree_recursive(const std::string& tree_hash);
+std::map<std::string, std::string> reconstruct_commit(const std::string& commit_hash);
+```
+
+`load_tree_recursive` reads a tree object and returns a `path → content` map, decompressing each referenced blob. It recurses into any `tree`-type entries — current trees are flat (single directory level), but this makes the function forward-compatible with nested directories without any further changes. `reconstruct_commit` reads the `tree:` hash from a commit's `metadata` and delegates to `load_tree_recursive`. This pair of functions is the **single source of truth** for "what did the project look like at commit X" — everything else is built on top of them.
+
+**The migration, step by step (each verified independently before moving on):**
+
+| Step | Operation      | Change                                                                                                                                                          |
+| ---- | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1    | _(foundation)_ | `load_tree_recursive` + `reconstruct_commit` implemented; cross-checked against the old `files/` folders for **all 12** existing commits — 12/12 byte-identical |
+| 2    | `status`       | HEAD comparison source switched to `reconstruct_commit(HEAD)`                                                                                                   |
+| 3    | `checkout`     | Both the "remove stale files" and "restore target files" passes now iterate `reconstruct_commit()` snapshots                                                    |
+| 4    | `diff`         | Both snapshots reconstructed from objects; LCS diffing logic unchanged                                                                                          |
+| 5    | `merge`        | `base`/`ours`/`theirs` all reconstructed from objects before the three-way comparison                                                                           |
+| 6    | `commit`       | Copy-forward from parent uses `reconstruct_commit(parent)`; **new commits no longer create a `files/` directory at all** — only `metadata` is written           |
+| 7    | `fsck`         | New command validating the whole graph (below)                                                                                                                  |
+| 8    | cleanup        | `files/` removed from all pre-existing commits, after a final `fsck` safety check                                                                               |
+
+Each step was re-tested against the exact same scenarios used in earlier phases — branch divergence (Phase 3), line-level diffs (Phase 4), clean _and_ conflicted merges (Phase 5) — with **identical output** before and after the swap.
+
+**`my_git fsck`** walks the entire object graph and reports problems:
+
+- Every commit's `tree:` object exists and is well-formed
+- Every blob/sub-tree referenced by a tree (recursively) exists in `.my_git/objects/`
+- Every commit's `parent`/`parent2` (if set) point to commits that actually exist (no dangling references)
+- Every ref — including `refs/remotes/<remote>/<branch>` — points to a valid commit
+
+A corrupted ref (a branch file rewritten to point at a nonexistent hash) is correctly detected and reported, then clears once the ref is restored — confirming `fsck` actively validates rather than rubber-stamping.
+
+**Final state.** After Step 8, **zero** `commits/<hash>/files/` directories exist anywhere in `.my_git/`. `selftest`'s "Commit → Tree → Blob traversal" check confirms every commit in history reconstructs to a non-empty snapshot purely from objects, and `fsck` reports 0 errors. Branch switching, diffing, and merging across the full `main`/`feature`/`conflict-test` history all continue to work exactly as before — but the entire repository can now be reconstructed from `.my_git/objects/` + `.my_git/commits/*/metadata` + `.my_git/refs/` alone.
 
 ---
 
@@ -272,8 +320,11 @@ my_git write-tree
 my_git ls-tree <tree-hash-from-above>
 
 my_git commit "a commit"
-# metadata now contains a "tree: <hash>" line
+# metadata now contains a "tree: <hash>" line, and there is NO files/ folder for this commit
 my_git ls-tree <that-tree-hash>
+
+my_git fsck          # validates the entire commit/tree/blob graph
+my_git selftest      # quick sanity checks, including commit -> tree -> blob traversal
 ```
 
 ---
@@ -284,13 +335,13 @@ my_git ls-tree <that-tree-hash>
 - No `.gitignore`-style ignore rules — `status` uses a hardcoded skip-list for `my_git`'s own files.
 - `graph` is terminal-ASCII only (no colors/interactive zoom), so very wide histories can become visually dense.
 - The tree object format is a **simplified text format**, not real Git's compact binary tree encoding.
-- The object database (Phase 7) exists _alongside_ the full-snapshot `files/` model — `checkout`/`diff`/`merge`/`status` still operate on `files/`, not on trees/blobs.
+- Tree objects are **flat** (single directory level) — `load_tree_recursive` recurses into `tree`-type entries for forward-compatibility, but `write_tree`/`cmd_commit` don't currently produce nested trees, so subdirectories aren't represented.
 - Single-file `main.cpp` — not yet split into modular headers/sources.
 - `push`/`pull` operate on local filesystem paths only; no network transport (HTTP/SSH).
 
 ## Possible Future Work
 
-- **Full object-database refactor**: make `checkout`, `diff`, `merge`, and `status` operate purely on `tree`/`blob` objects (reconstructing the working tree from the object store) instead of the `commits/<hash>/files/` snapshot folders.
+- Nested directory support in tree objects (currently flat; the traversal code is already written to handle it).
 - Binary tree format matching real Git's encoding.
 - Modularize into `include/` + `src/` with separate headers for hashing, diffing, merging, object storage, and repository operations.
 - Optional colored graph output and pager integration for large histories.
