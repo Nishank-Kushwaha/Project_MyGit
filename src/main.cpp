@@ -552,6 +552,54 @@ std::map<std::string, std::string> reconstruct_commit(const std::string &commit_
     return load_tree_recursive(tree_hash);
 }
 
+std::string trim_nl(std::string s)
+{
+    while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' '))
+        s.pop_back();
+    return s;
+}
+
+bool object_exists(const std::string &hash)
+{
+    if (hash.empty())
+        return false;
+    fs::path p = fs::path(".my_git/objects") / hash.substr(0, 2) / hash.substr(2);
+    return fs::exists(p);
+}
+
+// Recursively verify a tree object and everything it references
+void check_tree_recursive(const std::string &tree_hash, int &errors)
+{
+    if (!object_exists(tree_hash))
+    {
+        std::cout << "[ERROR] missing tree object: " << tree_hash.substr(0, 7) << "\n";
+        errors++;
+        return;
+    }
+    std::string raw = read_object(tree_hash);
+    size_t null_pos = raw.find('\0');
+    std::istringstream iss(raw.substr(null_pos + 1));
+    std::string line;
+    while (std::getline(iss, line))
+    {
+        if (line.empty())
+            continue;
+        std::istringstream ls(line);
+        std::string mode, type, hash, name;
+        ls >> mode >> type >> hash;
+
+        if (!object_exists(hash))
+        {
+            std::cout << "[ERROR] missing " << type << " object: " << hash.substr(0, 7)
+                      << " (referenced by tree " << tree_hash.substr(0, 7) << ")\n";
+            errors++;
+            continue;
+        }
+        if (type == "tree")
+            check_tree_recursive(hash, errors);
+    }
+}
+
 // Initialize my_git
 void cmd_init()
 {
@@ -1673,6 +1721,71 @@ void cmd_ls_tree(const std::string &hash)
     std::cout << raw.substr(null_pos + 1); // print entries as-is
 }
 
+void cmd_fsck()
+{
+    int errors = 0;
+
+    // 1. Check every commit: tree exists+valid, parent/parent2 point to real commits
+    for (const auto &entry : fs::directory_iterator(".my_git/commits"))
+    {
+        std::string hash = entry.path().filename().string();
+        std::string metadata = read_file(entry.path() / "metadata");
+        std::istringstream iss(metadata);
+        std::string line, parent, parent2, tree;
+        while (std::getline(iss, line))
+        {
+            if (line.rfind("parent2:", 0) == 0)
+                parent2 = trim_nl(line.substr(9));
+            else if (line.rfind("parent:", 0) == 0)
+                parent = trim_nl(line.substr(8));
+            else if (line.rfind("tree:", 0) == 0)
+                tree = trim_nl(line.substr(6));
+        }
+
+        if (tree.empty())
+        {
+            std::cout << "[ERROR] commit " << hash.substr(0, 7) << " has no tree: field\n";
+            errors++;
+        }
+        else
+        {
+            check_tree_recursive(tree, errors);
+        }
+
+        if (!parent.empty() && !fs::exists(fs::path(".my_git/commits") / parent / "metadata"))
+        {
+            std::cout << "[ERROR] commit " << hash.substr(0, 7) << " has dangling parent: " << parent.substr(0, 7) << "\n";
+            errors++;
+        }
+        if (!parent2.empty() && !fs::exists(fs::path(".my_git/commits") / parent2 / "metadata"))
+        {
+            std::cout << "[ERROR] commit " << hash.substr(0, 7) << " has dangling parent2: " << parent2.substr(0, 7) << "\n";
+            errors++;
+        }
+    }
+
+    // 2. Check every ref (including refs/remotes/.../...) points to a real commit
+    for (const auto &entry : fs::recursive_directory_iterator(".my_git/refs"))
+    {
+        if (!entry.is_regular_file())
+            continue;
+        std::string hash = trim_nl(read_file(entry.path()));
+        if (hash.empty())
+            continue;
+        if (!fs::exists(fs::path(".my_git/commits") / hash / "metadata"))
+        {
+            std::cout << "[ERROR] ref " << entry.path().string() << " points to missing commit "
+                      << hash.substr(0, 7) << "\n";
+            errors++;
+        }
+    }
+
+    if (errors == 0)
+        std::cout << "fsck: repository is healthy (0 errors)\n";
+    else
+        std::cout << "\nfsck: " << errors << " error(s) found\n";
+}
+
 int main(int argc, char *argv[])
 {
     if (argc < 2)
@@ -1882,6 +1995,8 @@ int main(int argc, char *argv[])
         std::cout << "\n"
                   << ok << "/" << total << " commits verified\n";
     }
+    else if (cmd == "fsck")
+        cmd_fsck();
     else if (cmd == "selftest")
     {
         int passed = 0, total = 0;
