@@ -1125,8 +1125,10 @@ void cmd_add(const std::string &filename)
         return;
     }
 
-    // Copy the file into the staging area
-    fs::path dest = fs::path(".my_git/staging") / source.filename();
+    // CHANGED: preserve the full relative path inside staging/ (supports subdirectories)
+    fs::path dest = fs::path(".my_git/staging") / filename;
+    if (dest.has_parent_path())
+        fs::create_directories(dest.parent_path());
     fs::copy_file(source, dest, fs::copy_options::overwrite_existing);
 
     // Add filename to index (if not already present)
@@ -1163,7 +1165,7 @@ void cmd_commit(const std::string &message)
     std::string parent = get_head_commit();
     std::string timestamp = current_timestamp();
 
-    // --- NEW: check for a pending merge (second parent) ---
+    // --- check for a pending merge (second parent) ---
     std::string parent2;
     bool is_merge = fs::exists(".my_git/MERGE_HEAD");
     if (is_merge)
@@ -1173,65 +1175,30 @@ void cmd_commit(const std::string &message)
             parent2.pop_back();
     }
 
-    // --- Build the full snapshot content first (in memory) ---
-    std::vector<std::string> all_files;
-    std::vector<std::string> all_contents;
+    // --- Build the full snapshot as a path -> content map (CHANGED for Phase 9: supports nested paths) ---
+    std::map<std::string, std::string> snapshot;
 
-    // CHANGED: copy-forward via reconstruct_commit instead of reading files/
     if (!parent.empty())
     {
-        auto parent_snapshot = reconstruct_commit(parent);
-        for (auto &[filename, content] : parent_snapshot)
-        {
-            all_files.push_back(filename);
-            all_contents.push_back(content);
-        }
+        snapshot = reconstruct_commit(parent);
     }
 
-    // Overlay staged files (add new, or update existing)
+    // Overlay staged files (add new, or update existing) — preserve full relative path
     for (const auto &filename : staged)
     {
-        fs::path src = fs::path(".my_git/staging") / fs::path(filename).filename();
+        fs::path src = fs::path(".my_git/staging") / filename; // CHANGED: no .filename(), keep subdirectory structure
         std::string content = read_file(src);
-        std::string fname = fs::path(filename).filename().string();
-
-        bool found = false;
-        for (size_t i = 0; i < all_files.size(); ++i)
-        {
-            if (all_files[i] == fname)
-            {
-                all_contents[i] = content;
-                found = true;
-                break;
-            }
-        }
-        if (!found)
-        {
-            all_files.push_back(fname);
-            all_contents.push_back(content);
-        }
+        snapshot[filename] = content; // insert or overwrite
     }
 
-    // NEW: build a tree object for this snapshot (Phase 7)
-    std::vector<std::pair<std::string, std::string>> tree_entries;
-    for (size_t i = 0; i < all_files.size(); ++i)
-    {
-        std::string blob_hash = write_object(all_contents[i], "blob");
-        tree_entries.push_back({all_files[i], blob_hash});
-    }
-    std::sort(tree_entries.begin(), tree_entries.end());
-
-    std::string tree_content;
-    for (auto &[name, hash] : tree_entries)
-        tree_content += "100644 blob " + hash + " " + name + "\n";
-
-    std::string tree_hash = write_object(tree_content, "tree");
+    // CHANGED: build a (possibly nested) tree object from the snapshot map (Phase 9)
+    std::string tree_hash = build_tree_from_map(snapshot);
 
     // --- Build hash input: metadata + all file contents ---
-    std::string hash_input = "message: " + message + "\n" + "timestamp: " + timestamp + "\n" + "parent: " + parent + "\n" + "parent2: " + parent2 + "\n" + "tree: " + tree_hash + "\n"; // NEW
-    for (size_t i = 0; i < all_files.size(); ++i)
+    std::string hash_input = "message: " + message + "\n" + "timestamp: " + timestamp + "\n" + "parent: " + parent + "\n" + "parent2: " + parent2 + "\n" + "tree: " + tree_hash + "\n";
+    for (auto &[path, content] : snapshot)
     {
-        hash_input += all_files[i] + ":" + all_contents[i] + "\n";
+        hash_input += path + ":" + content + "\n";
     }
 
     std::string new_id = sha1(hash_input);
@@ -1247,15 +1214,15 @@ void cmd_commit(const std::string &message)
     // Update HEAD
     set_head_commit(new_id);
 
-    // Clear staging area and index
+    // Clear staging area and index (CHANGED: preserve full path when removing)
     for (const auto &filename : staged)
     {
-        fs::path staged_file = fs::path(".my_git/staging") / fs::path(filename).filename();
+        fs::path staged_file = fs::path(".my_git/staging") / filename;
         fs::remove(staged_file);
     }
     write_file(".my_git/index", "");
 
-    // NEW: clear the pending merge marker
+    // Clear the pending merge marker
     if (is_merge)
     {
         fs::remove(".my_git/MERGE_HEAD");
