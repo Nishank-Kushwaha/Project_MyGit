@@ -1300,33 +1300,28 @@ void cmd_checkout(const std::string &name)
 
     std::string current_commit = get_head_commit();
 
-    // --- Remove files tracked by current commit but NOT in target commit ---
+    // CHANGED: reconstruct both snapshots from objects instead of reading files/
+    std::map<std::string, std::string> current_snapshot;
     if (!current_commit.empty())
+        current_snapshot = reconstruct_commit(current_commit);
+    std::map<std::string, std::string> target_snapshot = reconstruct_commit(target_commit);
+
+    // --- Remove files tracked by current commit but NOT in target commit ---
+    for (auto &[filename, content] : current_snapshot)
     {
-        fs::path current_files = fs::path(".my_git/commits") / current_commit / "files";
-        if (fs::exists(current_files))
+        if (target_snapshot.count(filename) == 0)
         {
-            for (const auto &entry : fs::directory_iterator(current_files))
-            {
-                std::string filename = entry.path().filename().string();
-                fs::path target_file = fs::path(".my_git/commits") / target_commit / "files" / filename;
-                if (!fs::exists(target_file))
-                {
-                    fs::remove(filename);
-                }
-            }
+            fs::remove(filename);
         }
     }
 
     // --- Restore files from target commit's snapshot ---
-    fs::path target_files = fs::path(".my_git/commits") / target_commit / "files";
-    if (fs::exists(target_files))
+    for (auto &[filename, content] : target_snapshot)
     {
-        for (const auto &entry : fs::directory_iterator(target_files))
-        {
-            fs::copy_file(entry.path(), entry.path().filename(),
-                          fs::copy_options::overwrite_existing);
-        }
+        fs::path p(filename);
+        if (p.has_parent_path())
+            fs::create_directories(p.parent_path()); // forward-compat for nested paths
+        write_file(filename, content);
     }
 
     // --- Update HEAD ---
