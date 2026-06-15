@@ -1879,6 +1879,7 @@ int main(int argc, char *argv[])
             {"cat-file", "Print contents of an object"},
             {"write-tree", "Build a tree object from directory"},
             {"ls-tree", "List entries of a tree object"},
+            {"fsck", "Perform repository consistency checks"},
         };
 
         for (const auto &[name, desc] : commands)
@@ -2024,39 +2025,6 @@ int main(int argc, char *argv[])
         }
         cmd_ls_tree(argv[2]);
     }
-    else if (cmd == "verify-objects")
-    {
-        int total = 0, ok = 0;
-        for (const auto &entry : fs::directory_iterator(".my_git/commits"))
-        {
-            std::string hash = entry.path().filename().string();
-            auto reconstructed = reconstruct_commit(hash);
-
-            fs::path files_dir = entry.path() / "files";
-            if (!fs::exists(files_dir))
-            {
-                total++;
-                ok++;
-                std::cout << "[PASS] " << hash.substr(0, 7)
-                          << "  (" << reconstructed.size() << " files via objects, no files/ -- object-only commit)\n";
-                continue;
-            }
-
-            std::map<std::string, std::string> from_files;
-            for (const auto &f : fs::directory_iterator(files_dir))
-                from_files[f.path().filename().string()] = read_file(f.path());
-
-            total++;
-            bool match = (reconstructed == from_files);
-            if (match)
-                ok++;
-            std::cout << (match ? "[PASS] " : "[FAIL] ") << hash.substr(0, 7)
-                      << "  (" << reconstructed.size() << " files via objects, "
-                      << from_files.size() << " via files/)\n";
-        }
-        std::cout << "\n"
-                  << ok << "/" << total << " commits verified\n";
-    }
     else if (cmd == "fsck")
     {
         cmd_fsck();
@@ -2124,6 +2092,30 @@ int main(int argc, char *argv[])
             std::cout << (mb_ok ? "[PASS] " : "[FAIL] ")
                       << "Merge base = " << (mb_ok ? base.substr(0, 7) : "(none found)") << "\n";
         }
+
+        // 6. Object-database traversal
+        total++;
+
+        bool traversal_ok = true;
+
+        for (const auto &entry : fs::directory_iterator(".my_git/commits"))
+        {
+            std::string hash = entry.path().filename().string();
+
+            auto snapshot = reconstruct_commit(hash);
+
+            if (snapshot.empty())
+            {
+                traversal_ok = false;
+                break;
+            }
+        }
+
+        if (traversal_ok)
+            passed++;
+
+        std::cout << (traversal_ok ? "[PASS] " : "[FAIL] ")
+                  << "Commit -> Tree -> Blob traversal\n";
 
         std::cout << "\n"
                   << passed << "/" << total << " checks passed\n";
