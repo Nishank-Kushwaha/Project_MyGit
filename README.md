@@ -2,7 +2,7 @@
 
 A simplified, **from-scratch** implementation of Git's core internals, written in C++20. `my_git` re-implements staging, content-addressable commits (with a hand-written SHA-1), branching, an LCS-based diff engine, three-way merging with conflict detection, local-path remotes (push/fetch/pull), and a real blob/tree/commit object database with zlib compression — without wrapping or calling the real `git` binary.
 
-As of Phase 8, the object database is the **sole storage backend**: `checkout`, `diff`, `merge`, `status`, and `commit` all operate purely on `commit → tree → blob` objects, with no per-commit file snapshots anywhere on disk. Phase 9 extends the tree model to support **nested directories** — `add`, `commit`, and `checkout` all handle recursive subdirectory structure natively.
+As of Phase 8, the object database is the **sole storage backend**: `checkout`, `diff`, `merge`, `status`, and `commit` all operate purely on `commit → tree → blob` objects, with no per-commit file snapshots anywhere on disk. Phase 9 extends the tree model to support **nested directories** — `add`, `commit`, `checkout`, and `status` all handle recursive subdirectory structure natively.
 
 This project was built incrementally, phase by phase, as a systems-programming exercise covering file I/O, hashing, graph algorithms, dynamic programming, and content-addressable storage.
 
@@ -300,6 +300,19 @@ The algorithm: split each path on its **first** `/`. Paths with no `/` are direc
 
 **`checkout` cleanup** — after removing a file at `nested_test/hello.cpp`, `remove_empty_dirs_upward` walks upward removing any now-empty parent directories. This ensures the `nested_test/` folder itself disappears when checking out a commit that predates it — not just the file inside it.
 
+**`status` recursive scan** — `cmd_status`'s directory-iterator loop was upgraded from `fs::directory_iterator` (root only) to `fs::recursive_directory_iterator`, so untracked and modified files inside subdirectories are detected correctly. Paths are normalized to forward-slash relative paths via `fs::relative(entry.path(), ".")`, matching the keys used by `head_snapshot` (from `reconstruct_commit`) and the staging index. The skip logic uses string-prefix matching on the full relative path to exclude only:
+
+| Skipped      | Reason                                  |
+| ------------ | --------------------------------------- |
+| `.my_git/`   | `my_git` internal storage               |
+| `.git/`      | real Git internal storage               |
+| `build/`     | compiled output, not source             |
+| `*.exe`      | compiled binaries                       |
+| `.gitkeep`   | empty directory placeholders            |
+| `.gitignore` | real Git's file, irrelevant to `my_git` |
+
+Everything else — `CMakeLists.txt`, `README.md`, `src/main.cpp`, `.vscode/settings.json` — is correctly reported as untracked until the user explicitly `add`s it, which is the right behavior: `my_git` should track all project files, not just ones it already knows about.
+
 **Verified end-to-end:**
 
 ```
@@ -312,6 +325,12 @@ commit dab31cc  →  tree 691ef0f
 
 checkout 070f7fe  →  nested_test/ completely gone (file + empty dir)
 checkout main    →  nested_test/hello.cpp correctly restored
+
+status (with new_file.txt added to nested_test/):
+  Untracked: nested_test/new_file.txt  ← recursive scan catches it
+
+status (with hello.cpp content modified):
+  Modified:  nested_test/hello.cpp     ← compared against HEAD blob correctly
 ```
 
 ---
@@ -384,6 +403,18 @@ my_git ls-tree <commit-tree-hash>
 my_git ls-tree <nested_test-tree-hash>
 # 100644 blob ...  hello.cpp
 
+# status detects nested untracked files
+echo "new" > nested_test/new_file.txt
+my_git status
+# Untracked files:
+#   nested_test/new_file.txt
+
+# status detects nested modifications
+echo "changed" > nested_test/hello.cpp
+my_git status
+# Modified (Changes not staged for commit):
+#   nested_test/hello.cpp
+
 # checkout to an older commit -> nested_test/ disappears (file + empty dir removed)
 my_git checkout <older-hash>
 # checkout back -> nested_test/hello.cpp fully restored
@@ -395,17 +426,16 @@ my_git checkout main
 ## Known Limitations
 
 - Tested with ASCII text files; binary file handling is untested.
-- No `.gitignore`-style ignore rules — `status` uses a hardcoded skip-list for `my_git`'s own files.
+- No `.gitignore`-style ignore rules — `status` uses a hardcoded skip-list (`build/`, `.git/`, `.my_git/`, `.gitignore`, `.gitkeep`, `*.exe`) rather than parsing a `.mygitignore` file.
 - `graph` is terminal-ASCII only (no colors/interactive zoom), so very wide histories can become visually dense.
 - The tree object format is a **simplified text format**, not real Git's compact binary tree encoding.
-- Nested directories are supported in `add`/`commit`/`checkout`, but `status` and `diff` currently operate on flat path→content maps — deeply nested modification detection is functional but `status`'s directory-iterator loop only scans one level deep for untracked files.
 - Single-file `main.cpp` — not yet split into modular headers/sources.
 - `push`/`pull` operate on local filesystem paths only; no network transport (HTTP/SSH).
 
 ## Possible Future Work
 
+- A `.mygitignore` file for user-defined skip rules in `status`.
 - Binary tree format matching real Git's encoding.
-- `status` untracked-file scan extended to walk subdirectories recursively.
 - Modularize into `include/` + `src/` with separate headers for hashing, diffing, merging, object storage, and repository operations.
 - Optional colored graph output and pager integration for large histories.
 - Automated unit tests (SHA-1 test vectors, LCS correctness, merge scenarios, object round-trips).
