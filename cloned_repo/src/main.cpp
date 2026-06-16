@@ -1933,140 +1933,6 @@ void cmd_pull(const std::string &remote_name, const std::string &branch_name)
     cmd_merge(tracking_ref);
 }
 
-void cmd_clone(const std::string &source, const std::string &destination)
-{
-    fs::path src(source);
-    fs::path src_git = src / ".my_git";
-    fs::path dst(destination);
-    fs::path dst_git = dst / ".my_git";
-
-    // Milestone 2: Validate source
-    if (!fs::exists(src) || !fs::is_directory(src))
-    {
-        std::cout << "fatal: source path '" << source << "' does not exist.\n";
-        return;
-    }
-    if (!fs::exists(src_git) || !fs::is_directory(src_git))
-    {
-        std::cout << "fatal: '" << source << "' is not a my_git repository.\n";
-        return;
-    }
-
-    // Milestone 3: Create destination
-    if (fs::exists(dst))
-    {
-        std::cout << "fatal: destination '" << destination << "' already exists.\n";
-        return;
-    }
-    fs::create_directories(dst_git);
-    std::cout << "Cloning into '" << destination << "'...\n";
-
-    // Milestone 4: Copy repository database
-    // Copy directories recursively
-    for (const std::string &entry : {"objects", "commits", "refs", "staging"})
-    {
-        fs::path s = src_git / entry;
-        fs::path d = dst_git / entry;
-        if (fs::exists(s))
-            fs::copy(s, d, fs::copy_options::recursive);
-        else
-            fs::create_directories(d); // create empty if missing in source
-    }
-
-    // Copy individual files
-    for (const std::string &f : {"HEAD", "index"})
-    {
-        fs::path s = src_git / f;
-        fs::path d = dst_git / f;
-        if (fs::exists(s))
-            fs::copy_file(s, d);
-        else
-            write_file(d, "");
-    }
-
-    // Milestone 5a: Create origin remote (absolute path)
-    fs::path abs_src = fs::absolute(src);
-    std::string abs_src_str = abs_src.string();
-    // Normalize to forward slashes for consistency
-    std::replace(abs_src_str.begin(), abs_src_str.end(), '\\', '/');
-    write_file(dst_git / "config", "remote.origin.url=" + abs_src_str + "\n");
-
-    // Milestone 5b: Initialize remote-tracking refs
-    // so that 'fetch origin' after cloning shows correct deltas
-    fs::path tracking_dir = dst_git / "refs" / "remotes" / "origin";
-    fs::create_directories(tracking_dir);
-
-    fs::path src_refs = src_git / "refs";
-    for (const auto &entry : fs::directory_iterator(src_refs))
-    {
-        if (!entry.is_regular_file())
-            continue;
-        std::string branch = entry.path().filename().string();
-        std::string hash = trim_nl(read_file(entry.path()));
-        if (!hash.empty())
-            write_file(tracking_dir / branch, hash);
-    }
-
-    // Milestone 6: Determine default branch from source HEAD
-    std::string head_content = read_file(src_git / "HEAD");
-    while (!head_content.empty() && (head_content.back() == '\n' || head_content.back() == '\r' || head_content.back() == ' '))
-        head_content.pop_back();
-
-    std::string default_branch = "main"; // fallback
-    std::string head_ref = "";
-
-    if (head_content.rfind("ref: ", 0) == 0)
-    {
-        head_ref = head_content.substr(5); // "refs/main"
-        size_t slash = head_ref.rfind('/');
-        default_branch = (slash != std::string::npos) ? head_ref.substr(slash + 1) : head_ref;
-    }
-    else
-    {
-        // detached HEAD — head_content is a raw commit hash
-        head_ref = head_content;
-        default_branch = "";
-    }
-
-    std::cout << "Default branch: " << (default_branch.empty() ? "(detached HEAD)" : default_branch) << "\n";
-
-    // Milestone 7: Checkout working tree
-    std::string head_commit;
-
-    if (!head_ref.empty() && fs::exists(dst_git / head_ref))
-    {
-        head_commit = trim_nl(read_file(dst_git / head_ref));
-    }
-    else if (head_content.rfind("ref: ", 0) != 0)
-    {
-        head_commit = head_content; // detached HEAD
-    }
-
-    if (head_commit.empty())
-    {
-        std::cout << "warning: HEAD has no commits yet. Empty repository cloned.\n";
-        return;
-    }
-
-    // Reconstruct snapshot from the CLONED repo's object database
-    // We temporarily switch CWD so read_object/write_file resolve
-    // relative to the clone root (where .my_git/ now lives)
-    fs::path original_cwd = fs::current_path();
-    fs::current_path(dst);
-
-    auto snapshot = reconstruct_commit(head_commit);
-    for (const auto &[path, content] : snapshot)
-    {
-        fs::path full = fs::path(".") / path;
-        fs::create_directories(full.parent_path());
-        write_file(full, content);
-    }
-
-    fs::current_path(original_cwd);
-
-    std::cout << "Done. " << snapshot.size() << " file(s) checked out.\n";
-}
-
 void cmd_hash_object(const std::string &filename)
 {
     if (!fs::exists(filename))
@@ -2159,7 +2025,6 @@ int main(int argc, char *argv[])
             {"push", "Send local commits to a remote"},
             {"fetch", "Download commits from a remote"},
             {"pull", "Fetch and merge from a remote"},
-            {"clone", "Clone a repository into a new directory"},
             {"hash-object", "Compute and store a blob object"},
             {"cat-file", "Print contents of an object"},
             {"write-tree", "Build a tree object from directory"},
@@ -2277,15 +2142,6 @@ int main(int argc, char *argv[])
             return 1;
         }
         cmd_pull(argv[2], argv[3]);
-    }
-    else if (cmd == "clone")
-    {
-        if (argc < 4)
-        {
-            std::cout << "Usage: my_git clone <source> <destination>\n";
-            return 1;
-        }
-        cmd_clone(argv[2], argv[3]);
     }
     else if (cmd == "hash-object")
     {
