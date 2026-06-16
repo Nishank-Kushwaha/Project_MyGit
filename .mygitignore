@@ -1,0 +1,10 @@
+build/
+.vscode/
+.git/
+*.exe
+*.obj
+*.o
+*.ilk
+*.pdb
+.gitignore
+.gitkeep

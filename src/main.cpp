@@ -759,6 +759,70 @@ void remove_empty_dirs_upward(fs::path dir)
     }
 }
 
+// Load all rules from .mygitignore at project root
+std::vector<std::string> load_ignore_rules()
+{
+    std::vector<std::string> rules;
+    std::ifstream in(".mygitignore");
+    if (!in)
+        return rules; // no file = no rules (other than hardcoded .my_git/)
+
+    std::string line;
+    while (std::getline(in, line))
+    {
+        // strip carriage return (Windows line endings)
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+
+        // skip empty lines and comments
+        if (line.empty() || line[0] == '#')
+            continue;
+
+        rules.push_back(line);
+    }
+    return rules;
+}
+
+// Check if a relative path (forward-slash separated) matches any ignore rule
+bool matches_ignore_rule(const std::string &relpath, const std::vector<std::string> &rules)
+{
+    // Always ignore .my_git/ — non-negotiable, not user-removable
+    if (relpath.rfind(".my_git/", 0) == 0 || relpath == ".my_git")
+        return true;
+
+    std::string filename = fs::path(relpath).filename().string();
+
+    for (const auto &rule : rules)
+    {
+        // Directory rule: ends with '/'
+        // e.g. "build/" matches "build/output.exe", "build/CMakeFiles/foo"
+        if (rule.back() == '/')
+        {
+            std::string dir = rule.substr(0, rule.size() - 1);
+            // matches if relpath starts with "dir/"
+            if (relpath.rfind(dir + "/", 0) == 0)
+                return true;
+        }
+        // Extension wildcard: starts with '*.'
+        // e.g. "*.exe" matches "output.exe", "build/app.exe"
+        else if (rule.size() > 2 && rule[0] == '*' && rule[1] == '.')
+        {
+            std::string ext = rule.substr(1); // ".exe"
+            if (filename.size() >= ext.size() &&
+                filename.substr(filename.size() - ext.size()) == ext)
+                return true;
+        }
+        // Exact filename match
+        // e.g. ".gitignore" matches any ".gitignore" anywhere
+        else
+        {
+            if (filename == rule || relpath == rule)
+                return true;
+        }
+    }
+    return false;
+}
+
 // ------------------------------------ All the available commands ---------------------------
 
 void cmd_init()
@@ -1171,6 +1235,16 @@ void cmd_add(const std::string &filename)
         return;
     }
 
+    // Reject ignored files
+    auto rules = load_ignore_rules();
+    std::string relpath = filename;
+    std::replace(relpath.begin(), relpath.end(), '\\', '/');
+    if (matches_ignore_rule(relpath, rules))
+    {
+        std::cout << "Ignored by .mygitignore: '" << filename << "'\n";
+        return;
+    }
+
     // CHANGED: preserve the full relative path inside staging/ (supports subdirectories)
     fs::path dest = fs::path(".my_git/staging") / filename;
     if (dest.has_parent_path())
@@ -1373,26 +1447,19 @@ void cmd_status()
         return s;
     };
 
-    // Top-level directories to skip entirely (build artifacts, IDE files)
-    auto skip_entry = [](const fs::directory_entry &entry) -> bool
+    // Load ignore rules once, use for all entries
+    auto rules = load_ignore_rules();
+
+    auto skip_entry = [&rules](const fs::directory_entry &entry) -> bool
     {
         std::string p = entry.path().string();
         std::replace(p.begin(), p.end(), '\\', '/');
 
-        // Skip version control internals and build artifacts
-        if (p.find("./.my_git/") == 0 ||
-            p.find("./.git/") == 0 ||
-            p.find("./build/") == 0)
-            return true;
+        // Strip leading "./" for consistent matching
+        if (p.rfind("./", 0) == 0)
+            p = p.substr(2);
 
-        if (!entry.is_regular_file())
-            return false;
-
-        std::string name = entry.path().filename().string();
-        if (name.ends_with(".exe") || name == ".gitkeep" || name == ".gitignore")
-            return true;
-
-        return false;
+        return matches_ignore_rule(p, rules);
     };
 
     // --- Section 1: Staged files ---
