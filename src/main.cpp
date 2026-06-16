@@ -1293,6 +1293,36 @@ void cmd_status()
     if (!head.empty())
         head_snapshot = reconstruct_commit(head);
 
+    // Helper: get relative path from project root as string with forward slashes
+    auto rel_path = [](const fs::path &p) -> std::string
+    {
+        std::string s = fs::relative(p, ".").string();
+        std::replace(s.begin(), s.end(), '\\', '/');
+        return s;
+    };
+
+    // Top-level directories to skip entirely (build artifacts, IDE files)
+    auto skip_entry = [](const fs::directory_entry &entry) -> bool
+    {
+        std::string p = entry.path().string();
+        std::replace(p.begin(), p.end(), '\\', '/');
+
+        // Skip version control internals and build artifacts
+        if (p.find("./.my_git/") == 0 ||
+            p.find("./.git/") == 0 ||
+            p.find("./build/") == 0)
+            return true;
+
+        if (!entry.is_regular_file())
+            return false;
+
+        std::string name = entry.path().filename().string();
+        if (name.ends_with(".exe") || name == ".gitkeep" || name == ".gitignore")
+            return true;
+
+        return false;
+    };
+
     // --- Section 1: Staged files ---
     std::cout << "Staged for commit:\n";
     if (staged.empty())
@@ -1311,49 +1341,46 @@ void cmd_status()
     std::cout << "\nModified (Changes not staged for commit):\n";
     bool any_modified = false;
 
-    for (const auto &entry : fs::directory_iterator("."))
+    for (const auto &entry : fs::recursive_directory_iterator("."))
     {
+        if (skip_entry(entry))
+            continue;
         if (!entry.is_regular_file())
             continue;
 
-        std::string filename = entry.path().filename().string();
-
-        if (filename == ".gitignore" || filename == "README.md" ||
-            filename == "CMakeLists.txt" || filename.ends_with(".exe"))
-            continue;
+        std::string relpath = rel_path(entry.path());
 
         bool is_staged = false;
         for (const auto &f : staged)
         {
-            if (f == filename)
+            if (f == relpath)
             {
                 is_staged = true;
                 break;
             }
         }
 
-        bool in_last_commit = head_snapshot.count(filename) > 0; // CHANGED
+        bool in_last_commit = head_snapshot.count(relpath) > 0;
 
         if (is_staged)
         {
-            fs::path staged_copy = fs::path(".my_git/staging") / filename;
+            fs::path staged_copy = fs::path(".my_git/staging") / relpath;
             if (!files_equal(entry.path(), staged_copy))
             {
-                std::cout << "  " << filename << "\n";
+                std::cout << "  " << relpath << "\n";
                 any_modified = true;
             }
         }
         else if (in_last_commit)
         {
             std::string working_content = read_file(entry.path());
-            if (working_content != head_snapshot[filename]) // CHANGED: in-memory compare
+            if (working_content != head_snapshot[relpath])
             {
-                std::cout << "  " << filename << "\n";
+                std::cout << "  " << relpath << "\n";
                 any_modified = true;
             }
         }
     }
-
     if (!any_modified)
         std::cout << "  (none)\n";
 
@@ -1361,24 +1388,20 @@ void cmd_status()
     std::cout << "\nUntracked files:\n";
     bool any_untracked = false;
 
-    for (const auto &entry : fs::directory_iterator("."))
+    for (const auto &entry : fs::recursive_directory_iterator("."))
     {
+        if (skip_entry(entry))
+            continue;
         if (!entry.is_regular_file())
             continue;
 
-        std::string filename = entry.path().filename().string();
-
-        // Skip my_git's own files/folders
-        if (filename == ".my_git" || entry.path().string().find(".my_git") != std::string::npos)
-            continue;
-        if (filename.ends_with(".exe") || filename == "CMakeLists.txt")
-            continue;
+        std::string relpath = rel_path(entry.path());
 
         // Is it already staged?
         bool is_staged = false;
         for (const auto &f : staged)
         {
-            if (f == filename)
+            if (f == relpath)
             {
                 is_staged = true;
                 break;
@@ -1386,11 +1409,11 @@ void cmd_status()
         }
 
         // Was it part of the last commit?
-        bool in_last_commit = head_snapshot.count(filename) > 0; // CHANGED
+        bool in_last_commit = head_snapshot.count(relpath) > 0;
 
         if (!is_staged && !in_last_commit)
         {
-            std::cout << "  " << filename << "\n";
+            std::cout << "  " << relpath << "\n";
             any_untracked = true;
         }
     }
