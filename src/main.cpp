@@ -713,6 +713,20 @@ std::string build_tree_from_map(const std::map<std::string, std::string> &files)
     return write_object(tree_content, "tree");
 }
 
+// Walk upward from `dir`, removing it (and ancestors) while they're empty.
+// Stops at the project root or .my_git.
+void remove_empty_dirs_upward(fs::path dir)
+{
+    while (!dir.empty() && dir != "." && fs::exists(dir) && fs::is_empty(dir))
+    {
+        fs::path parent = dir.parent_path();
+        fs::remove(dir);
+        if (parent == dir)
+            break; // safety: avoid infinite loop at root
+        dir = parent;
+    }
+}
+
 // ------------------------------------ All the available commands ---------------------------
 
 void cmd_init()
@@ -1436,7 +1450,10 @@ void cmd_checkout(const std::string &name)
     {
         if (target_snapshot.count(filename) == 0)
         {
+            fs::path p(filename);
             fs::remove(filename);
+            if (p.has_parent_path())
+                remove_empty_dirs_upward(p.parent_path()); // NEW
         }
     }
 
