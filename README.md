@@ -2,7 +2,7 @@
 
 A simplified, **from-scratch** implementation of Git's core internals, written in C++20. `my_git` re-implements staging, content-addressable commits (with a hand-written SHA-1), branching, an LCS-based diff engine, three-way merging with conflict detection, local-path remotes (push/fetch/pull), and a real blob/tree/commit object database with zlib compression — without wrapping or calling the real `git` binary.
 
-As of Phase 8, the object database is the **sole storage backend**: `checkout`, `diff`, `merge`, `status`, and `commit` all operate purely on `commit → tree → blob` objects, with no per-commit file snapshots anywhere on disk.
+As of Phase 8, the object database is the **sole storage backend**: `checkout`, `diff`, `merge`, `status`, and `commit` all operate purely on `commit → tree → blob` objects, with no per-commit file snapshots anywhere on disk. Phase 9 extends the tree model to support **nested directories** — `add`, `commit`, and `checkout` all handle recursive subdirectory structure natively.
 
 This project was built incrementally, phase by phase, as a systems-programming exercise covering file I/O, hashing, graph algorithms, dynamic programming, and content-addressable storage.
 
@@ -24,6 +24,7 @@ This project was built incrementally, phase by phase, as a systems-programming e
   - [Commit Graph Visualization (Multi-Lane ASCII DAG)](#7-commit-graph-visualization-multi-lane-ascii-dag)
   - [Object Database (Blobs, Trees, Compression)](#8-object-database-blobs-trees-compression)
   - [Object-Based Architecture (Phase 8)](#9-object-based-architecture-phase-8)
+  - [Nested Directory Trees (Phase 9)](#10-nested-directory-trees-phase-9)
 - [Example Walkthrough](#example-walkthrough)
 - [Known Limitations](#known-limitations)
 - [Possible Future Work](#possible-future-work)
@@ -32,17 +33,17 @@ This project was built incrementally, phase by phase, as a systems-programming e
 
 ## Features
 
-| Category          | What's implemented                                                                                                                                  |
-| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Local VCS**     | `init`, `add`, `commit`, `log`, `status`                                                                                                            |
-| **Hashing**       | Hand-written SHA-1 for content-addressable commit IDs                                                                                               |
-| **Branching**     | `branch`, `checkout` (including detached HEAD), symbolic `HEAD` + `refs/`                                                                           |
-| **Diffing**       | `diff <hash1> <hash2>` using an LCS-based line diff (`-`/`+` output)                                                                                |
-| **Merging**       | `merge <branch>` — merge-base detection, three-way merge, auto-merge, conflict markers, two-parent merge commits                                    |
-| **Distributed**   | `remote add`, `push`, `fetch`, `pull` between local repositories                                                                                    |
-| **Visualization** | `graph` — multi-lane ASCII DAG with merge connectors, branch labels, and `HEAD` marker                                                              |
-| **Object DB**     | `hash-object`, `cat-file -p`, `write-tree`, `ls-tree` — real Git-style content-addressed blob/tree objects with zlib compression and de-duplication |
-| **Integrity**     | `fsck` — validates the full commit/tree/blob graph and refs; `selftest` — quick sanity checks including commit→tree→blob traversal of every commit  |
+| Category          | What's implemented                                                                                                                                                                 |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Local VCS**     | `init`, `add`, `commit`, `log`, `status`                                                                                                                                           |
+| **Hashing**       | Hand-written SHA-1 for content-addressable commit IDs                                                                                                                              |
+| **Branching**     | `branch`, `checkout` (including detached HEAD), symbolic `HEAD` + `refs/`                                                                                                          |
+| **Diffing**       | `diff <hash1> <hash2>` using an LCS-based line diff (`-`/`+` output)                                                                                                               |
+| **Merging**       | `merge <branch>` — merge-base detection, three-way merge, auto-merge, conflict markers, two-parent merge commits                                                                   |
+| **Distributed**   | `remote add`, `push`, `fetch`, `pull` between local repositories                                                                                                                   |
+| **Visualization** | `graph` — multi-lane ASCII DAG with merge connectors, branch labels, and `HEAD` marker                                                                                             |
+| **Object DB**     | `hash-object`, `cat-file -p`, `write-tree`, `ls-tree` — real Git-style content-addressed blob/tree objects with zlib compression, de-duplication, and **nested directory support** |
+| **Integrity**     | `fsck` — validates the full commit/tree/blob graph and refs; `selftest` — quick sanity checks including commit→tree→blob traversal of every commit                                 |
 
 ---
 
@@ -118,7 +119,7 @@ project/
     ├── HEAD                  # "ref: refs/main"  OR a raw commit hash (detached HEAD)
     ├── index                 # staged file paths, one per line
     ├── config                # remote.<name>.url=<path>
-    ├── staging/              # snapshot copies of staged files
+    ├── staging/              # snapshot copies of staged files (mirrors working-directory structure, including subdirs)
     ├── commits/
     │   └── <sha1-hash>/
     │       └── metadata     # message, timestamp, parent, parent2, tree (Phase 8: no files/ — see Object-Based Architecture)
@@ -225,10 +226,10 @@ Phase 7 added a genuine Git-style **content-addressable object store** under `.m
 
 ```
 100644 blob c5639cd2586a9320f1ba8b060ce7b63f1b322566 file1.txt
-100644 blob f75b2d6ca3b48adde2c765fcabe74b3f4ff50be6 file2.txt
+040000 tree e78c44963058fca5ddf90aa4d35c596a3b83b994 nested_test
 ```
 
-`100644` is Git's real mode string for a regular file. Entries are **sorted by filename** before hashing, so the same set of (filename, content) pairs always produces the same tree hash — required for commits to be deterministic. `write-tree` builds a tree from the current directory; `ls-tree <hash>` prints a tree object's entries.
+`100644` is Git's real mode string for a regular file; `040000` is the mode for a directory (subtree). Entries are **sorted by name** before hashing, so the same set of (name, content) pairs always produces the same tree hash — required for commits to be deterministic. `write-tree` builds a tree from the current directory (recursively); `ls-tree <hash>` prints a tree object's entries. See [Nested Directory Trees](#10-nested-directory-trees-phase-9) for the full recursive implementation.
 
 **Commits point to trees.** `cmd_commit` builds a blob for every file in the snapshot, assembles a tree object from those blobs, and records the tree's hash in `metadata` as `tree: <hash>` (also folded into the commit's own SHA-1 input). The result is a real `commit → tree → blob` graph.
 
@@ -245,7 +246,7 @@ std::map<std::string, std::string> load_tree_recursive(const std::string& tree_h
 std::map<std::string, std::string> reconstruct_commit(const std::string& commit_hash);
 ```
 
-`load_tree_recursive` reads a tree object and returns a `path → content` map, decompressing each referenced blob. It recurses into any `tree`-type entries — current trees are flat (single directory level), but this makes the function forward-compatible with nested directories without any further changes. `reconstruct_commit` reads the `tree:` hash from a commit's `metadata` and delegates to `load_tree_recursive`. This pair of functions is the **single source of truth** for "what did the project look like at commit X" — everything else is built on top of them.
+`load_tree_recursive` reads a tree object and returns a `path → content` map, decompressing each referenced blob. It recurses into any `tree`-type entries — Phase 9 extended `write_tree` and `cmd_commit` to actually produce nested trees, so this recursion is now exercised in real commits (not just forward-compatible code). `reconstruct_commit` reads the `tree:` hash from a commit's `metadata` and delegates to `load_tree_recursive`. This pair of functions is the **single source of truth** for "what did the project look like at commit X" — everything else is built on top of them.
 
 **The migration, step by step (each verified independently before moving on):**
 
@@ -272,6 +273,46 @@ Each step was re-tested against the exact same scenarios used in earlier phases 
 A corrupted ref (a branch file rewritten to point at a nonexistent hash) is correctly detected and reported, then clears once the ref is restored — confirming `fsck` actively validates rather than rubber-stamping.
 
 **Final state.** After Step 8, **zero** `commits/<hash>/files/` directories exist anywhere in `.my_git/`. `selftest`'s "Commit → Tree → Blob traversal" check confirms every commit in history reconstructs to a non-empty snapshot purely from objects, and `fsck` reports 0 errors. Branch switching, diffing, and merging across the full `main`/`feature`/`conflict-test` history all continue to work exactly as before — but the entire repository can now be reconstructed from `.my_git/objects/` + `.my_git/commits/*/metadata` + `.my_git/refs/` alone.
+
+### 10. Nested Directory Trees (Phase 9)
+
+Phase 9 closes the last structural gap in the tree model: **subdirectories**. Before this phase, every tree was a flat list of blobs (`100644 blob <hash> <name>`). After Phase 9, trees can contain other trees (`040000 tree <hash> <dirname>`), and the entire stack — `add`, `commit`, `checkout`, `status`, `diff`, `merge` — handles paths like `src/utils/helper.cpp` natively.
+
+**`build_tree_from_map(map<path, content>) → hash`** is the core new function. It takes a flat `map` of `/`-separated paths to file contents (exactly what `reconstruct_commit` returns) and recursively builds a nested tree:
+
+```
+Input: {
+  "file1.txt"            → "Hello Git"
+  "nested_test/hello.cpp" → "int main(){}"
+}
+
+Output tree:
+  100644 blob <hash> file1.txt
+  040000 tree <hash> nested_test
+               └── 100644 blob <hash> hello.cpp
+```
+
+The algorithm: split each path on its **first** `/`. Paths with no `/` are direct blobs. Paths with a `/` are grouped by their first component into a `subdirs` map, each group then processed by a recursive call. This naturally handles arbitrary nesting depth (`a/b/c/file.txt` → three levels of tree objects).
+
+**`cmd_add` change** — the only other change needed: `fs::path(".my_git/staging") / filename` (dropping `.filename()`) so that staging `nested_test/hello.cpp` writes to `staging/nested_test/hello.cpp` instead of the flat `staging/hello.cpp`. `fs::create_directories` ensures the subdirectory exists inside `staging/` before copying.
+
+**`cmd_commit` change** — switched from parallel `vector<string> all_files/all_contents` to `map<string,string> snapshot` (path → content). `reconstruct_commit(parent)` already returns this exact type, so copy-forward is a one-liner (`snapshot = reconstruct_commit(parent)`). `build_tree_from_map(snapshot)` then replaces the old flat tree-construction block entirely.
+
+**`checkout` cleanup** — after removing a file at `nested_test/hello.cpp`, `remove_empty_dirs_upward` walks upward removing any now-empty parent directories. This ensures the `nested_test/` folder itself disappears when checking out a commit that predates it — not just the file inside it.
+
+**Verified end-to-end:**
+
+```
+commit dab31cc  →  tree 691ef0f
+  ├── 100644 blob feature_file.txt
+  ├── 100644 blob file1.txt
+  ├── ...
+  └── 040000 tree nested_test (e78c449)
+        └── 100644 blob hello.cpp
+
+checkout 070f7fe  →  nested_test/ completely gone (file + empty dir)
+checkout main    →  nested_test/hello.cpp correctly restored
+```
 
 ---
 
@@ -327,6 +368,28 @@ my_git fsck          # validates the entire commit/tree/blob graph
 my_git selftest      # quick sanity checks, including commit -> tree -> blob traversal
 ```
 
+### Nested directory walkthrough
+
+```powershell
+mkdir nested_test
+Set-Content -Encoding ascii -Value "int main(){}" nested_test\hello.cpp
+my_git add nested_test/hello.cpp
+my_git commit "add nested directory"
+
+# inspect the tree structure
+my_git ls-tree <commit-tree-hash>
+# 100644 blob ...  file1.txt
+# 040000 tree ...  nested_test       <- subdirectory as a tree entry
+
+my_git ls-tree <nested_test-tree-hash>
+# 100644 blob ...  hello.cpp
+
+# checkout to an older commit -> nested_test/ disappears (file + empty dir removed)
+my_git checkout <older-hash>
+# checkout back -> nested_test/hello.cpp fully restored
+my_git checkout main
+```
+
 ---
 
 ## Known Limitations
@@ -335,14 +398,14 @@ my_git selftest      # quick sanity checks, including commit -> tree -> blob tra
 - No `.gitignore`-style ignore rules — `status` uses a hardcoded skip-list for `my_git`'s own files.
 - `graph` is terminal-ASCII only (no colors/interactive zoom), so very wide histories can become visually dense.
 - The tree object format is a **simplified text format**, not real Git's compact binary tree encoding.
-- Tree objects are **flat** (single directory level) — `load_tree_recursive` recurses into `tree`-type entries for forward-compatibility, but `write_tree`/`cmd_commit` don't currently produce nested trees, so subdirectories aren't represented.
+- Nested directories are supported in `add`/`commit`/`checkout`, but `status` and `diff` currently operate on flat path→content maps — deeply nested modification detection is functional but `status`'s directory-iterator loop only scans one level deep for untracked files.
 - Single-file `main.cpp` — not yet split into modular headers/sources.
 - `push`/`pull` operate on local filesystem paths only; no network transport (HTTP/SSH).
 
 ## Possible Future Work
 
-- Nested directory support in tree objects (currently flat; the traversal code is already written to handle it).
 - Binary tree format matching real Git's encoding.
+- `status` untracked-file scan extended to walk subdirectories recursively.
 - Modularize into `include/` + `src/` with separate headers for hashing, diffing, merging, object storage, and repository operations.
 - Optional colored graph output and pager integration for large histories.
 - Automated unit tests (SHA-1 test vectors, LCS correctness, merge scenarios, object round-trips).
