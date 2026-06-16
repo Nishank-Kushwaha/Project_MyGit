@@ -11,6 +11,8 @@
 #include <map>
 #include <queue>
 #include <zlib.h>
+#include <algorithm>
+#include <cstdio>
 
 namespace fs = std::filesystem;
 
@@ -191,6 +193,36 @@ void set_head_commit(const std::string &commit_hash)
     {
         write_file(".my_git/HEAD", commit_hash);
     }
+}
+
+// Parse a ctime()-style timestamp ("Www Mmm dd hh:mm:ss yyyy") into time_t, purely for sorting.
+time_t parse_timestamp(const std::string &ts)
+{
+    static const std::map<std::string, int> months = {
+        {"Jan", 0}, {"Feb", 1}, {"Mar", 2}, {"Apr", 3}, {"May", 4}, {"Jun", 5}, {"Jul", 6}, {"Aug", 7}, {"Sep", 8}, {"Oct", 9}, {"Nov", 10}, {"Dec", 11}};
+
+    char wd[4] = {0}, mon[4] = {0};
+    int day = 0, hour = 0, min = 0, sec = 0, year = 0;
+
+    int matched = sscanf(ts.c_str(), "%3s %3s %d %d:%d:%d %d",
+                         wd, mon, &day, &hour, &min, &sec, &year);
+    if (matched != 7)
+        return 0; // unparsable -> sorts as oldest, shouldn't normally happen
+
+    auto it = months.find(mon);
+    if (it == months.end())
+        return 0;
+
+    std::tm tm{};
+    tm.tm_year = year - 1900;
+    tm.tm_mon = it->second;
+    tm.tm_mday = day;
+    tm.tm_hour = hour;
+    tm.tm_min = min;
+    tm.tm_sec = sec;
+    tm.tm_isdst = -1;
+
+    return mktime(&tm);
 }
 
 // Split file content into lines
@@ -1250,36 +1282,76 @@ void cmd_commit(const std::string &message)
 
 void cmd_log()
 {
-    std::string current = get_head_commit();
+    std::string start = get_head_commit();
 
-    if (current.empty())
+    if (start.empty())
     {
         std::cout << "No commits yet\n";
         return;
     }
 
-    while (!current.empty())
+    struct LogEntry
     {
+        std::string hash, message, timestamp;
+        time_t time;
+    };
+
+    std::queue<std::string> q;
+    std::set<std::string> visited;
+    std::vector<LogEntry> entries;
+
+    q.push(start);
+    visited.insert(start);
+
+    while (!q.empty())
+    {
+        std::string current = q.front();
+        q.pop();
+
         fs::path metadata_path = fs::path(".my_git/commits") / current / "metadata";
         std::string content = read_file(metadata_path);
 
-        std::cout << "commit " << current << "\n";
-
-        // Parse metadata line by line
         std::istringstream iss(content);
-        std::string line, parent;
+        std::string line, parent, parent2, timestamp, message;
         while (std::getline(iss, line))
         {
             if (line.rfind("message:", 0) == 0)
-                std::cout << "    " << line.substr(9) << "\n"; // skip "message: "
+                message = line.substr(9);
             else if (line.rfind("timestamp:", 0) == 0)
-                std::cout << "Date:   " << line.substr(11) << "\n";
+                timestamp = line.substr(11);
+            else if (line.rfind("parent2:", 0) == 0)
+                parent2 = line.substr(9);
             else if (line.rfind("parent:", 0) == 0)
-                parent = line.substr(8); // skip "parent: "
+                parent = line.substr(8);
         }
-        std::cout << "\n";
+        for (auto *s : {&parent, &parent2, &timestamp, &message})
+            while (!s->empty() && (s->back() == '\n' || s->back() == '\r' || s->back() == ' '))
+                s->pop_back();
 
-        current = parent; // move to parent commit (could be empty -> loop ends)
+        entries.push_back({current, message, timestamp, parse_timestamp(timestamp)});
+
+        if (!parent.empty() && !visited.count(parent))
+        {
+            visited.insert(parent);
+            q.push(parent);
+        }
+        if (!parent2.empty() && !visited.count(parent2))
+        {
+            visited.insert(parent2);
+            q.push(parent2);
+        }
+    }
+
+    // Newest -> oldest. Ties keep whatever relative order std::sort gives them.
+    std::sort(entries.begin(), entries.end(),
+              [](const LogEntry &a, const LogEntry &b)
+              { return a.time > b.time; });
+
+    for (const auto &e : entries)
+    {
+        std::cout << "commit " << e.hash << "\n";
+        std::cout << "    " << e.message << "\n";
+        std::cout << "Date:   " << e.timestamp << "\n\n";
     }
 }
 
