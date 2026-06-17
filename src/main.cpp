@@ -29,6 +29,14 @@ struct CommitInfo
 
 // ------------------------------------ All the helper functions ---------------------------
 
+// Removes trailing newlines, carriage returns, and spaces from a string.
+std::string trim_nl(std::string s)
+{
+    while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' '))
+        s.pop_back();
+    return s;
+}
+
 // Read entire file content as a string
 std::string read_file(const fs::path &p)
 {
@@ -304,20 +312,33 @@ std::vector<DiffLine> diff_lines(const std::vector<std::string> &a, const std::v
 std::set<std::string> get_ancestors(const std::string &commit_hash)
 {
     std::set<std::string> ancestors;
-    std::string current = commit_hash;
+    std::queue<std::string> q;
 
-    while (!current.empty())
+    if (!commit_hash.empty())
+        q.push(commit_hash);
+
+    while (!q.empty())
     {
+        std::string current = q.front();
+        q.pop();
+        if (current.empty() || ancestors.count(current))
+            continue;
         ancestors.insert(current);
+
         std::string metadata = read_file(fs::path(".my_git/commits") / current / "metadata");
         std::istringstream iss(metadata);
-        std::string line, parent;
+        std::string line, parent, parent2;
         while (std::getline(iss, line))
         {
-            if (line.rfind("parent:", 0) == 0)
-                parent = line.substr(8);
+            if (line.rfind("parent2:", 0) == 0)
+                parent2 = trim_nl(line.substr(9));
+            else if (line.rfind("parent:", 0) == 0)
+                parent = trim_nl(line.substr(8));
         }
-        current = parent;
+        if (!parent.empty())
+            q.push(parent);
+        if (!parent2.empty())
+            q.push(parent2);
     }
     return ancestors;
 }
@@ -327,21 +348,41 @@ std::string find_merge_base(const std::string &ours, const std::string &theirs)
 {
     std::set<std::string> ours_ancestors = get_ancestors(ours);
 
-    std::string current = theirs;
-    while (!current.empty())
+    std::queue<std::string> q;
+    std::set<std::string> visited;
+    if (!theirs.empty())
     {
+        q.push(theirs);
+        visited.insert(theirs);
+    }
+
+    while (!q.empty())
+    {
+        std::string current = q.front();
+        q.pop();
         if (ours_ancestors.count(current))
             return current;
 
         std::string metadata = read_file(fs::path(".my_git/commits") / current / "metadata");
         std::istringstream iss(metadata);
-        std::string line, parent;
+        std::string line, parent, parent2;
         while (std::getline(iss, line))
         {
-            if (line.rfind("parent:", 0) == 0)
-                parent = line.substr(8);
+            if (line.rfind("parent2:", 0) == 0)
+                parent2 = trim_nl(line.substr(9));
+            else if (line.rfind("parent:", 0) == 0)
+                parent = trim_nl(line.substr(8));
         }
-        current = parent;
+        if (!parent.empty() && !visited.count(parent))
+        {
+            visited.insert(parent);
+            q.push(parent);
+        }
+        if (!parent2.empty() && !visited.count(parent2))
+        {
+            visited.insert(parent2);
+            q.push(parent2);
+        }
     }
     return "";
 }
@@ -365,7 +406,14 @@ std::string get_remote_url(const std::string &name)
     while (std::getline(iss, line))
     {
         if (line.rfind(prefix, 0) == 0)
-            return line.substr(prefix.size());
+        {
+            std::string url = trim_nl(line.substr(prefix.size()));
+            fs::path p(url);
+            if (p.is_relative())
+                url = fs::absolute(p).string();
+            std::replace(url.begin(), url.end(), '\\', '/');
+            return url;
+        }
     }
     return "";
 }
@@ -382,36 +430,50 @@ int copy_commits_recursive(const fs::path &src_root, const fs::path &dst_root, c
         fs::path src_commit = src_root / ".my_git/commits" / current;
         fs::path dst_commit = dst_root / ".my_git/commits" / current;
 
-        if (fs::exists(dst_commit))
+        // Always copy objects unconditionally (safe, content-addressable)
+        fs::path src_objects = src_root / ".my_git/objects";
+        fs::path dst_objects = dst_root / ".my_git/objects";
+        if (fs::exists(src_objects))
         {
-            // Already present in destination -> its ancestors must already be there too, stop
-            break;
+            for (const auto &aa : fs::directory_iterator(src_objects))
+            {
+                if (!aa.is_directory())
+                    continue;
+                for (const auto &obj : fs::directory_iterator(aa))
+                {
+                    fs::path dst_obj = dst_objects / aa.path().filename() / obj.path().filename();
+                    if (!fs::exists(dst_obj))
+                    {
+                        fs::create_directories(dst_obj.parent_path());
+                        fs::copy_file(obj.path(), dst_obj);
+                    }
+                }
+            }
         }
 
-        // Copy the entire commit folder (files/ + metadata)
+        if (fs::exists(dst_commit))
+            break;
+
         fs::create_directories(dst_commit);
-        fs::copy(src_commit, dst_commit, fs::copy_options::recursive | fs::copy_options::overwrite_existing);
+        fs::copy(src_commit, dst_commit,
+                 fs::copy_options::recursive | fs::copy_options::overwrite_existing);
         copied++;
 
-        // Read parent(s) to continue walking
         std::string metadata = read_file(src_commit / "metadata");
         std::istringstream iss(metadata);
         std::string line, parent, parent2;
         while (std::getline(iss, line))
         {
             if (line.rfind("parent2:", 0) == 0)
-                parent2 = line.substr(9);
+                parent2 = trim_nl(line.substr(9));
             else if (line.rfind("parent:", 0) == 0)
-                parent = line.substr(8);
+                parent = trim_nl(line.substr(8));
         }
 
-        // Recurse for second parent (merge commits) separately
         if (!parent2.empty())
-        {
             copied += copy_commits_recursive(src_root, dst_root, parent2);
-        }
 
-        current = parent; // continue main chain
+        current = parent;
     }
     return copied;
 }
@@ -590,14 +652,6 @@ std::map<std::string, std::string> reconstruct_commit(const std::string &commit_
     return load_tree_recursive(tree_hash);
 }
 
-// Removes trailing newlines, carriage returns, and spaces from a string.
-std::string trim_nl(std::string s)
-{
-    while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' '))
-        s.pop_back();
-    return s;
-}
-
 // Checks whether an object with the given SHA-1 hash exists in .my_git/objects.
 bool object_exists(const std::string &hash)
 {
@@ -746,15 +800,14 @@ std::string build_tree_from_map(const std::map<std::string, std::string> &files)
 }
 
 // Walk upward from `dir`, removing it (and ancestors) while they're empty.
-// Stops at the project root or .my_git.
-void remove_empty_dirs_upward(fs::path dir)
+void remove_empty_dirs_upward(fs::path dir, const fs::path &stop_at = ".")
 {
-    while (!dir.empty() && dir != "." && fs::exists(dir) && fs::is_empty(dir))
+    while (!dir.empty() && dir != stop_at && dir != "." && fs::exists(dir) && fs::is_empty(dir))
     {
         fs::path parent = dir.parent_path();
         fs::remove(dir);
         if (parent == dir)
-            break; // safety: avoid infinite loop at root
+            break;
         dir = parent;
     }
 }
@@ -1339,6 +1392,8 @@ void cmd_commit(const std::string &message)
     {
         fs::path staged_file = fs::path(".my_git/staging") / filename;
         fs::remove(staged_file);
+        if (staged_file.has_parent_path())
+            remove_empty_dirs_upward(staged_file.parent_path(), fs::path(".my_git/staging"));
     }
     write_file(".my_git/index", "");
 
@@ -1615,7 +1670,7 @@ void cmd_checkout(const std::string &name)
             fs::path p(filename);
             fs::remove(filename);
             if (p.has_parent_path())
-                remove_empty_dirs_upward(p.parent_path()); // NEW
+                remove_empty_dirs_upward(p.parent_path(), fs::path(".")); // NEW
         }
     }
 
@@ -1801,9 +1856,11 @@ void cmd_merge(const std::string &branch_name)
 void cmd_remote_add(const std::string &name, const std::string &path)
 {
     std::string config = read_file(".my_git/config");
-    config += "remote." + name + ".url=" + path + "\n";
+    std::string abs_path = fs::absolute(fs::path(path)).string();
+    std::replace(abs_path.begin(), abs_path.end(), '\\', '/');
+    config += "remote." + name + ".url=" + abs_path + "\n";
     write_file(".my_git/config", config);
-    std::cout << "Added remote '" << name << "' -> " << path << "\n";
+    std::cout << "Added remote '" << name << "' -> " << abs_path << "\n";
 }
 
 void cmd_push(const std::string &remote_name, const std::string &branch_name)
