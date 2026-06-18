@@ -20,7 +20,7 @@ int main(int argc, char *argv[])
     if (argc < 2)
     {
         cmd_help();
-        return 0;
+        return 1;
     }
 
     std::string cmd = argv[1];
