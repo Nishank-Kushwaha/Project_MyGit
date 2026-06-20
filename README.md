@@ -1,8 +1,8 @@
 # my_git
 
-A simplified, **from-scratch** implementation of Git's core internals, written in C++20. `my_git` re-implements staging, content-addressable commits (with a hand-written SHA-1), branching, an LCS-based diff engine, three-way merging with conflict detection, local-path remotes (push/fetch/pull/clone), a `.mygitignore` ignore system, and a real blob/tree/commit object database with zlib compression — without wrapping or calling the real `git` binary.
+A simplified, **from-scratch** implementation of Git's core internals, written in C++20. `my_git` re-implements staging, content-addressable commits (with a hand-written SHA-1), branching, an LCS-based diff engine, three-way merging with conflict detection, dual-transport remotes — local filesystem paths **and** a real HTTP server (push/fetch/pull/clone over the network) — a `.mygitignore` ignore system, and a real blob/tree/commit object database with zlib compression — without wrapping or calling the real `git` binary.
 
-The object database is the **sole storage backend**: `checkout`, `diff`, `merge`, `status`, and `commit` all operate purely on `commit → tree → blob` objects, with no per-commit file snapshots anywhere on disk. The tree model supports **nested directories** natively — `add`, `commit`, `checkout`, and `status` all handle recursive subdirectory structure. The entire codebase has been modularized into `utils/`, `core/`, and `commands/` layers with separate headers and sources.
+The object database is the **sole storage backend**: `checkout`, `diff`, `merge`, `status`, and `commit` all operate purely on `commit → tree → blob` objects, with no per-commit file snapshots anywhere on disk. The tree model supports **nested directories** natively — `add`, `commit`, `checkout`, and `status` all handle recursive subdirectory structure. The entire codebase has been modularized into `utils/`, `core/`, and `commands/` layers with separate headers and sources, plus a standalone `my_git_server` executable for the HTTP transport.
 
 This project was built incrementally as a systems-programming exercise covering file I/O, hashing, graph algorithms, dynamic programming, and content-addressable storage.
 
@@ -28,6 +28,8 @@ This project was built incrementally as a systems-programming exercise covering 
   - [.mygitignore Ignore System](#10-mygitignore-ignore-system)
   - [Staging Area Lifecycle](#11-staging-area-lifecycle)
   - [Codebase Modularization](#12-codebase-modularization)
+  - [HTTP Server (my_git_server)](#13-http-server-my_git_server)
+  - [Read-Only Repository API](#14-read-only-repository-api)
 - [Example Walkthrough](#example-walkthrough)
 - [Known Limitations](#known-limitations)
 - [Possible Future Work](#possible-future-work)
@@ -43,7 +45,8 @@ This project was built incrementally as a systems-programming exercise covering 
 | **Branching**     | `branch`, `checkout` (including detached HEAD), symbolic `HEAD` + `refs/`                                                                                                         |
 | **Diffing**       | `diff <hash1> <hash2>` using an LCS-based line diff (`-`/`+` output)                                                                                                              |
 | **Merging**       | `merge <branch>` — merge-base detection, three-way merge, auto-merge, conflict markers, two-parent merge commits                                                                  |
-| **Distributed**   | `remote add`, `push`, `fetch`, `pull`, `clone` — full remote workflow between local filesystem paths                                                                              |
+| **Distributed**   | `remote add`, `push`, `fetch`, `pull`, `clone` — full remote workflow over **both** local filesystem paths and HTTP                                                               |
+| **Networking**    | Standalone `my_git_server` (cpp-httplib) exposing a repo over HTTP — `GET /refs`, `/refs/<name>`, `/commit/<hash>`, `/object/<hash>`, `POST /push`, `POST /have`                  |
 | **Ignore System** | `.mygitignore` — pattern-based ignore rules (directory suffix `/`, glob `*.ext`, exact name) respected by `add` and `status`                                                      |
 | **Visualization** | `graph` — multi-lane ASCII DAG with merge connectors, branch labels, and `HEAD` marker                                                                                            |
 | **Object DB**     | `hash-object`, `cat-file -p`, `write-tree`, `ls-tree` — real Git-style content-addressed blob/tree objects with zlib compression, deduplication, and **nested directory support** |
@@ -61,10 +64,13 @@ my_git/
 ├── README.md
 ├── src/
 │   ├── main.cpp               ← only main() + command dispatch (~180 lines)
+│   ├── server/
+│   │   └── main.cpp           ← my_git_server entrypoint: GET routes + POST /push, POST /have
 │   ├── utils/
 │   │   ├── sha1.cpp           ← hand-written SHA-1 (no OpenSSL)
 │   │   ├── file_io.cpp        ← read_file, write_file, read_lines, files_equal, remove_empty_dirs_upward
-│   │   └── time.cpp           ← current_timestamp, parse_timestamp
+│   │   ├── time.cpp           ← current_timestamp, parse_timestamp
+│   │   └── base64.cpp         ← base64_encode/decode for binary object transfer over JSON
 │   ├── core/
 │   │   ├── object_store.cpp   ← zlib_compress/decompress, write_object, read_object,
 │   │   │                         build_tree_from_map, load_tree_recursive, reconstruct_commit,
@@ -74,7 +80,9 @@ my_git/
 │   │   │                         copy_commits_recursive
 │   │   ├── diff_engine.cpp    ← split_lines, build_lcs_table, diff_lines, DiffLine struct
 │   │   ├── ignore.cpp         ← load_ignore_rules, matches_ignore_rule
-│   │   └── remote.cpp         ← get_remote_url
+│   │   ├── remote.cpp         ← get_remote_url
+│   │   └── http_client.cpp    ← is_http_url, http_get_refs/ref/commit_metadata/object,
+│   │                             http_fetch_commits, http_push_branch, http_check_have
 │   └── commands/
 │       ├── init.cpp
 │       ├── add.cpp
@@ -87,27 +95,33 @@ my_git/
 │       ├── merge.cpp
 │       ├── graph.cpp
 │       ├── remote.cpp         ← cmd_remote_add, cmd_push, cmd_fetch, cmd_pull, cmd_clone
+│       │                         (each branches on is_http_url() for HTTP vs filesystem transport)
 │       ├── fsck.cpp           ← cmd_fsck (with static helpers), cmd_selftest
 │       ├── plumbing.cpp       ← cmd_hash_object, cmd_cat_file, cmd_write_tree, cmd_ls_tree
 │       └── help.cpp
 ├── include/
+│   ├── third_party/
+│   │   └── httplib.h          ← vendored single-header HTTP library (yhirose/cpp-httplib)
 │   ├── utils/
 │   │   ├── sha1.h
 │   │   ├── file_io.h
-│   │   └── time.h
+│   │   ├── time.h
+│   │   └── base64.h
 │   ├── core/
 │   │   ├── object_store.h
 │   │   ├── refs.h
 │   │   ├── commits.h
 │   │   ├── diff_engine.h
 │   │   ├── ignore.h
-│   │   └── remote.h
+│   │   ├── remote.h
+│   │   └── http_client.h
 │   └── commands/
 │       ├── init.h / add.h / commit.h / log.h / status.h
 │       ├── diff.h / branch.h / checkout.h / merge.h / graph.h
 │       ├── remote.h / fsck.h / plumbing.h / help.h
 └── build/
-    └── my_git.exe
+    ├── my_git.exe
+    └── my_git_server.exe
 ```
 
 ---
@@ -119,6 +133,8 @@ my_git/
 - C++20 compiler (e.g., MinGW `g++` via MSYS2, or any modern GCC/Clang)
 - CMake ≥ 3.15
 - **zlib** (used by the object database for compression)
+- **cpp-httplib** — vendored as a single header at `include/third_party/httplib.h` (no separate install needed)
+- Threading support — `find_package(Threads REQUIRED)`; on Windows, `ws2_32` and `crypt32` (sockets + TLS plumbing httplib references)
 
 On MSYS2/MinGW, install zlib if missing:
 
@@ -126,7 +142,7 @@ On MSYS2/MinGW, install zlib if missing:
 pacman -S mingw-w64-ucrt-x86_64-zlib
 ```
 
-`CMakeLists.txt` links it via `target_link_libraries(my_git z)` and exposes all headers via `include_directories(include)`.
+`CMakeLists.txt` defines **two executables** from one build: `my_git` (the CLI) and `my_git_server` (the HTTP server). Both link `z` and `Threads::Threads`; `my_git_server` additionally links a minimal slice of `core/` (`object_store.cpp`, `commits.cpp`) so it can validate fast-forwards and write objects directly, without depending on the rest of the CLI's command layer. `include_directories(include)` exposes all headers — including `third_party/httplib.h` — to both targets.
 
 ### Build (Windows / PowerShell)
 
@@ -137,13 +153,16 @@ cmake .. -G "MinGW Makefiles"
 cmake --build .
 ```
 
+This produces both `build/my_git.exe` and `build/my_git_server.exe`.
+
 ### Run
 
 ```powershell
 .\build\my_git.exe help
+.\build\my_git_server.exe 8080 path\to\repo
 ```
 
-On Linux/macOS, omit `-G "MinGW Makefiles"` and run `./build/my_git`.
+On Linux/macOS, omit `-G "MinGW Makefiles"` and run `./build/my_git` / `./build/my_git_server`.
 
 ---
 
@@ -160,11 +179,11 @@ my_git checkout <branch|hash>     Switch branch, or detach HEAD at a commit
 my_git diff <hash1> <hash2>       Compare two commit snapshots (LCS diff)
 my_git merge <branch>             Three-way merge another branch into current
 my_git graph                      Show a multi-lane ASCII commit DAG
-my_git remote add <name> <path>   Register a local-path remote
-my_git push <remote> <branch>     Push a branch to a remote (fast-forward only)
-my_git fetch <remote>             Download new commits into remote-tracking refs
-my_git pull <remote> <branch>     fetch + merge in one step
-my_git clone <source> <dest>      Clone a repository into a new directory
+my_git remote add <name> <path|url>   Register a remote: local filesystem path OR http:// URL
+my_git push <remote> <branch>         Push a branch (fast-forward only); HTTP or filesystem transport
+my_git fetch <remote>                 Download new commits into remote-tracking refs (HTTP or filesystem)
+my_git pull <remote> <branch>         fetch + merge in one step (works identically over HTTP)
+my_git clone <source> <dest>          Clone a repository (source: local path OR http:// URL)
 my_git hash-object <file>         Compute a blob hash and store it as an object
 my_git cat-file -p <hash>         Print the decompressed contents of an object
 my_git write-tree                 Build a tree object from the current directory
@@ -172,6 +191,10 @@ my_git ls-tree <hash>             List the entries of a tree object
 my_git fsck                       Validate the commit/tree/blob graph and refs
 my_git selftest                   Run built-in unit tests (5 checks)
 my_git help                       Show this command list
+```
+
+```
+my_git_server <port> <repo_path>  Serve a repo over HTTP (separate executable, not a my_git subcommand)
 ```
 
 ---
@@ -185,7 +208,7 @@ project/
 └── .my_git/
     ├── HEAD                  # "ref: refs/main"  OR a raw commit hash (detached HEAD)
     ├── index                 # staged file paths, one per line
-    ├── config                # remote.<name>.url=<path>
+    ├── config                # remote.<name>.url=<path>  OR  remote.<name>.url=http://host:port
     ├── MERGE_HEAD            # exists only during an in-progress merge (stores second-parent hash)
     ├── staging/              # snapshot copies of staged files (mirrors working-directory structure, including subdirs)
     ├── commits/
@@ -310,28 +333,33 @@ If there are no conflicts, the merged files are written to the working directory
 
 ### 6. Remotes (Push / Fetch / Pull / Clone)
 
-Remotes in `my_git` are local filesystem paths — there is no network transport. This is equivalent to real Git's `file://` protocol. A remote is registered by writing a single line into `.my_git/config`:
+`my_git` supports **two remote transports**, chosen automatically based on the registered URL: a **filesystem transport** (the original implementation, equivalent to real Git's `file://` protocol) and an **HTTP transport** (added in Phases 13–18, talking to a `my_git_server` instance). A remote is registered by writing a single line into `.my_git/config`:
 
 ```
 remote.origin.url=C:/path/to/RemoteRepo
+remote.origin.url=http://localhost:8080
 ```
 
-`get_remote_url()` reads this config, resolves relative paths to absolute, and normalizes backslashes to forward slashes for cross-platform consistency.
+`get_remote_url()` reads this config. For filesystem paths it resolves relative paths to absolute and normalizes backslashes to forward slashes; for `http://`/`https://` URLs it returns the string **unmodified** — an early bug had `fs::absolute()` mangling HTTP URLs by treating them as relative paths, since `std::filesystem` considers `"http://host:port"` a relative path (no drive letter, no leading slash). Both `cmd_remote_add` and `get_remote_url` now check `is_http_url()` first and skip path resolution entirely for HTTP.
 
-**`push`** — walks the local commit chain backwards by following `parent:` links in each commit's metadata. For each commit encountered, it checks whether that commit already exists in the remote's `.my_git/commits/`. If not, it copies the entire commit folder (metadata + any associated objects) from local to remote using `copy_commits_recursive`. It also copies any new objects from local `.my_git/objects/` into remote's object store (skipping objects that already exist — deduplication). Finally it overwrites the remote's `refs/<branch>` with the new tip hash. If the remote's current tip is not an ancestor of the local tip, the push is rejected (fast-forward only).
+Each of `cmd_push`, `cmd_fetch`, `cmd_pull`, and `cmd_clone` begins with an `if (is_http_url(remote_path)) { ... HTTP branch ... } else { ... filesystem branch (unchanged) ... }` split, so the filesystem behavior described below is byte-for-byte identical to earlier phases, with the HTTP behavior layered alongside it.
 
-**`fetch`** — the reverse of push. Iterates over all branches in the remote's `refs/` directory, calls `copy_commits_recursive` from remote into local (same recursive logic, just swapped direction), and updates `.my_git/refs/remotes/<name>/<branch>` tracking refs to reflect what the remote currently has. Does **not** touch the working directory or HEAD — only downloads objects and updates remote-tracking refs.
+**Filesystem `push`** — walks the local commit chain backwards by following `parent:` links in each commit's metadata. For each commit encountered, it checks whether that commit already exists in the remote's `.my_git/commits/`. If not, it copies the entire commit folder (metadata + any associated objects) from local to remote using `copy_commits_recursive`. It also copies any new objects from local `.my_git/objects/` into remote's object store (skipping objects that already exist — deduplication). Finally it overwrites the remote's `refs/<branch>` with the new tip hash. If the remote's current tip is not an ancestor of the local tip, the push is rejected (fast-forward only).
 
-**`pull`** — a two-line operation:
+**Filesystem `fetch`** — the reverse of push. Iterates over all branches in the remote's `refs/` directory, calls `copy_commits_recursive` from remote into local (same recursive logic, just swapped direction), and updates `.my_git/refs/remotes/<name>/<branch>` tracking refs to reflect what the remote currently has. Does **not** touch the working directory or HEAD — only downloads objects and updates remote-tracking refs.
+
+**`pull`** (identical code for both transports) — a two-line operation:
 
 ```cpp
 cmd_fetch(remote_name);
 cmd_merge("remotes/" + remote_name + "/" + branch);
 ```
 
-Fetch brings the commits down, merge integrates them into the current branch. After a conflict-free pull, the user stages and commits to record the merge commit (with `parent2` pointing at the fetched tip).
+Fetch brings the commits down, merge integrates them into the current branch. After a conflict-free pull, the user stages and commits to record the merge commit (with `parent2` pointing at the fetched tip). Because `cmd_fetch` already branches internally on transport type and `cmd_merge` only ever reads local data, `cmd_pull` required **zero code changes** to work over HTTP — verified end-to-end during Phase 17 testing.
 
-**`clone`** — creates the destination directory, initializes it as a new repo (`cmd_init`), then copies the entire `.my_git/objects/` and `.my_git/commits/` database from source to destination using `fs::copy` with recursive + overwrite options. Writes `remote.origin.url=<source>` into the clone's config. Then reads the source's `HEAD` to determine the default branch, copies the corresponding ref, and checks out the working tree by reconstructing the tip commit's snapshot and writing all files to disk via `write_file` (creating any needed subdirectories). The result is a fully functional repo with full history and a configured `origin`.
+**Filesystem `clone`** — creates the destination directory, initializes it as a new repo (`cmd_init`), then copies the entire `.my_git/objects/` and `.my_git/commits/` database from source to destination using `fs::copy` with recursive + overwrite options. Writes `remote.origin.url=<source>` into the clone's config. Then reads the source's `HEAD` to determine the default branch, copies the corresponding ref, and checks out the working tree by reconstructing the tip commit's snapshot and writing all files to disk via `write_file` (creating any needed subdirectories). The result is a fully functional repo with full history and a configured `origin`. `staging/` is always created **empty** on clone (never copied from source) — staged-but-uncommitted work shouldn't carry over to a clone, matching real Git's behavior.
+
+**HTTP `push`/`fetch`/`clone`** are described in detail in sections 13–14 below, alongside the server that makes them possible.
 
 ### 7. Commit Graph Visualization (Multi-Lane ASCII DAG)
 
@@ -480,6 +508,39 @@ All headers live under `include/` mirroring the `src/` structure. `CMakeLists.tx
 
 Internal helper functions used only within a single command file (e.g. `check_tree_recursive` in `fsck.cpp`) are declared `static` and never exposed in any header — they are private to their translation unit.
 
+### 13. HTTP Server (my_git_server)
+
+`my_git_server` is a **second, independent executable**, built from `src/server/main.cpp`, sharing only a slice of `core/` with the CLI (`object_store.cpp` and `commits.cpp` — just enough to read/write objects and validate fast-forwards). It uses [cpp-httplib](https://github.com/yhirose/cpp-httplib), a single-header HTTP library vendored at `include/third_party/httplib.h`.
+
+```powershell
+my_git_server.exe 8080 path\to\repo
+```
+
+On startup the server validates that `path\to\repo\.my_git` exists, captures the **absolute** path for its startup message, then calls `fs::current_path(repo_root)` so every subsequent file operation can use the same relative paths (`".my_git/objects/..."`, etc.) as the CLI — meaning `object_store.cpp` and `commits.cpp` work completely unmodified inside the server, with zero awareness that they're running inside a different executable. (Capturing the absolute path _before_ the `current_path` call matters: doing it after caused a real bug where the path got prepended to itself, producing a doubled path in the startup message — purely cosmetic, since the actual `current_path` change had already succeeded, but confusing to read.)
+
+The server is single-threaded-per-request via httplib's default thread pool and holds no in-memory state between requests — every route re-reads from disk, so the server can be killed and restarted at any time without losing anything (all durable state lives in `.my_git/` on disk, same as the CLI).
+
+### 14. Read-Only Repository API
+
+Four `GET` routes expose a repository's contents for reading, matching exactly what `cmd_fetch` and `cmd_clone` need to reconstruct a repo remotely:
+
+| Route                | Reads from                                          | Returns                                                           |
+| -------------------- | --------------------------------------------------- | ----------------------------------------------------------------- |
+| `GET /refs`          | `.my_git/refs/` (recursively, including `remotes/`) | JSON array: `[{"name":"main","hash":"..."}]`                      |
+| `GET /refs/<name>`   | `.my_git/refs/<name>`                               | raw commit hash (plain text), 404 if missing                      |
+| `GET /commit/<hash>` | `.my_git/commits/<hash>/metadata`                   | raw metadata text, 404 if missing                                 |
+| `GET /object/<hash>` | `.my_git/objects/<aa>/<rest>`                       | raw on-disk bytes (header + zlib-compressed body), 404 if missing |
+
+`GET /object/<hash>` deliberately returns the **exact on-disk bytes**, not decompressed content — the client already knows how to parse `"<type> <size>\0" + [4-byte length] + compressed_body` via `read_object()`, so the server does zero compression/decompression work and stays a thin disk-reading layer. This symmetry matters later: `POST /push` (section 17 below, see Example Walkthrough) writes objects in this exact same raw format, so a pushed object is byte-identical to what a subsequent `GET /object/<hash>` would serve.
+
+`/refs` uses a small hand-rolled JSON array builder (`list_refs_recursive`) rather than a JSON library — the response shape is fixed and simple enough that a dependency wasn't worth adding. The same pattern (hand-rolled JSON, no library) is used throughout the networking layer, including the client-side parsing in `http_client.cpp` and the request bodies for `POST /push` and `POST /have`.
+
+**Client-side consumption (`core/http_client.cpp`)** mirrors these four routes one-to-one: `http_get_refs`, `http_get_ref`, `http_get_commit_metadata`, `http_get_object`. `http_fetch_commits` is the orchestrator — given a starting commit hash, it walks `parent`/`parent2` links (via `http_get_commit_metadata`, parsing the same `parent:`/`parent2:`/`tree:` metadata format used everywhere else in the codebase), and for each commit's `tree:` hash, recursively walks every blob/subtree referenced (`fetch_tree_recursive`, mirroring the local `load_tree_recursive` logic but fetching over HTTP instead of reading local disk). Every fetched commit and object is written to `.my_git/commits/` and `.my_git/objects/` in the identical on-disk format the filesystem transport produces — `object_exists()` is checked before each write, so a fetch never re-downloads something already present, and a fetch can be safely interrupted and resumed (each commit/object is durable the moment it's written).
+
+`cmd_fetch` and `cmd_clone` both branch on `is_http_url(remote_path)` at their very top — the HTTP branch calls into `http_client.cpp`, the filesystem branch is the original unmodified logic from section 6. `cmd_clone`'s HTTP path additionally needs to discover _every_ branch (not just one), so it calls `http_get_refs` once and loops `http_fetch_commits` per branch, writing each as both a local branch ref (`refs/<branch>`) and a remote-tracking ref (`refs/remotes/origin/<branch>`) — `main` is preferred as the default branch if present, otherwise the first branch returned is used as a fallback.
+
+**Push and the negotiation protocol** (`POST /push`, `POST /have`) extend the server beyond read-only. `POST /push` accepts a JSON body of `{branch, commits: [{hash, metadata}], objects: [{hash, data_base64}]}` — objects are base64-encoded (via `utils/base64.cpp`, a from-scratch standard-alphabet implementation, since httplib carries no base64 utility) since raw zlib-compressed bytes aren't valid JSON text. The server writes each object and commit to disk (skipping anything matching `object_exists()`/an existing metadata file), then runs the **same fast-forward check** as the filesystem transport — `find_merge_base(current_tip, new_tip) == current_tip` — before updating the branch ref, rejecting with HTTP `409` otherwise. `POST /have` lets the client ask "which of these candidate commit/object hashes do you already have?" _before_ building the push payload, so `http_push_branch` only uploads the genuine delta rather than guessing based on locally-reasoned ancestor chains (which can be wrong or incomplete if the client doesn't have the remote's full history cached) — this is the same negotiation idea real Git's `git-upload-pack`/`git-receive-pack` use before transferring a packfile.
+
 ---
 
 ## Example Walkthrough
@@ -602,17 +663,66 @@ my_git checkout <older-hash>
 my_git checkout main
 ```
 
+### HTTP networking walkthrough
+
+```powershell
+# Terminal 1 — start the server, pointed at an existing repo
+my_git_server.exe 8080 path\to\LocalRepo
+# my_git server listening on port 8080
+# Serving repository: C:\...\LocalRepo
+
+# Terminal 2 — clone it over HTTP
+my_git clone http://localhost:8080 ClonedRepo
+# Cloning into 'ClonedRepo'...
+# Default branch: main
+# Done. N file(s) checked out.
+
+cd ClonedRepo
+my_git remote add origin http://localhost:8080
+my_git log     # full history, fetched object-by-object over HTTP
+my_git fsck    # validates the entire fetched graph, 0 errors
+
+# Push a new commit back to the server
+echo "networked" > net.txt
+my_git add net.txt
+my_git commit "Add net.txt over HTTP"
+my_git push origin main
+# POST /push: server validates fast-forward, writes objects + commit, updates ref
+
+# Fetch + pull pick up server-side changes the same way as filesystem remotes
+my_git fetch origin
+my_git pull origin main
+```
+
+Direct API inspection (no my_git client needed):
+
+```powershell
+curl http://localhost:8080/refs
+# [{"name":"main","hash":"a33fb0f4..."}]
+
+curl http://localhost:8080/refs/main
+# a33fb0f4d879509747ed4e7483b6f42245591da2
+
+curl http://localhost:8080/commit/a33fb0f4d879509747ed4e7483b6f42245591da2
+# message: ...
+# timestamp: ...
+# parent: ...
+# tree: ...
+```
+
 ---
 
 ## Known Limitations
 
-- `push` is fast-forward only — no force push or diverged history resolution
+- `push` is fast-forward only (both transports) — no force push or diverged history resolution
 - After a conflict-free `pull` or `merge`, the user must manually `add` changed files and `commit` to record the merge commit — there is no auto-commit on clean merge
-- No network transport — remotes are local filesystem paths only
+- HTTP transport has no authentication — any client that can reach the server can push (acceptable for local/trusted-network use, not for public exposure)
+- HTTP transport is plain HTTP only — no TLS, despite `crypt32` being linked (present only because httplib's header references it, not actively used)
+- `POST /push` and `POST /have` use hand-rolled JSON parsing tied to the exact shapes this codebase produces — not a general-purpose JSON parser, so malformed or differently-shaped requests aren't handled gracefully
 - Binary file handling is untested
 - `graph` is terminal ASCII only (no color, no pager)
 - Tree object format is simplified text, not real Git's compact binary encoding
-- `clone` does not copy `.mygitignore` from the source repo to the destination
+- `clone` does not copy `.mygitignore` from the source repo to the destination (true for both transports)
 
 ---
 
@@ -627,11 +737,14 @@ my_git checkout main
 - **`tag`** — named, permanent references to specific commits
 - **`clone` copies `.mygitignore`** — so the cloned repo has the same ignore rules as the source
 - **Colored graph output** and pager integration for large histories
-- **Network transport** (HTTP/SSH) for true remote repositories
 - **Binary tree format** matching real Git's compact binary encoding
+- **HTTP auth** — shared-secret or token-based push authentication
+- **TLS support** for the HTTP transport (currently plain HTTP only)
+- **Packfile-style bulk transfer** — batch multiple objects into one compressed payload instead of one `GET /object/<hash>` per object, reducing per-request overhead on large histories
+- **A real JSON library** to replace the hand-rolled parsing in `/push`, `/have`, and `http_client.cpp`, once request shapes grow more complex
 
 ---
 
 ## Tech Stack
 
-C++20 · `std::filesystem` · `fstream` · `zlib` · `map`/`set`/`queue` · CMake
+C++20 · `std::filesystem` · `fstream` · `zlib` · `map`/`set`/`queue` · CMake · [cpp-httplib](https://github.com/yhirose/cpp-httplib) (vendored, header-only) · hand-written SHA-1 and base64
