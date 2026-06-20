@@ -385,6 +385,41 @@ int http_push_branch(const std::string &base_url, const std::string &branch, con
         return 0;
     }
 
+    // ---------------------------------------------------------------
+    // Smart transfer: ask the remote what it already has, and trim
+    // commits_to_send / objects_to_send down to the genuine delta.
+    // ---------------------------------------------------------------
+    std::set<std::string> have_commits, have_objects;
+    bool have_check_ok = http_check_have(base_url, commits_to_send, objects_to_send, have_commits, have_objects);
+
+    if (have_check_ok)
+    {
+        std::vector<std::string> filtered_commits;
+        for (const auto &h : commits_to_send)
+            if (!have_commits.count(h))
+                filtered_commits.push_back(h);
+
+        std::vector<std::string> filtered_objects;
+        for (const auto &h : objects_to_send)
+            if (!have_objects.count(h))
+                filtered_objects.push_back(h);
+
+        // local_tip's own commit entry must always be sent even if somehow
+        // already reported as "have" (e.g. re-push of same tip with new branch name)
+        // since the server needs at least one commit to determine the new ref target.
+        if (filtered_commits.empty() &&
+            std::find(commits_to_send.begin(), commits_to_send.end(), local_tip) != commits_to_send.end())
+        {
+            filtered_commits.push_back(local_tip);
+        }
+
+        commits_to_send = filtered_commits;
+        objects_to_send = filtered_objects;
+    }
+    // if the /have check fails (server unreachable for that call, or older server
+    // without /have support), fall through and send the full candidate set as before —
+    // correctness is preserved, we just lose the bandwidth optimization for this push.
+
     // Build JSON body. Client sends commits in "newest first" order (frontier search above
     // doesn't guarantee that ordering perfectly, but the server only reads the FIRST commit's
     // hash as the new tip — so we put local_tip first explicitly).
@@ -432,4 +467,70 @@ int http_push_branch(const std::string &base_url, const std::string &branch, con
         return 2;
 
     return 0;
+}
+
+// Parses a JSON array of strings from a response body: "key":["a","b"]
+static std::set<std::string> parse_json_string_array(const std::string &body, const std::string &key)
+{
+    std::set<std::string> result;
+    std::string needle = "\"" + key + "\":[";
+    size_t key_pos = body.find(needle);
+    if (key_pos == std::string::npos)
+        return result;
+
+    size_t pos = key_pos + needle.size();
+    size_t array_end = body.find(']', pos);
+    if (array_end == std::string::npos)
+        return result;
+
+    while (pos < array_end)
+    {
+        size_t quote_start = body.find('"', pos);
+        if (quote_start == std::string::npos || quote_start > array_end)
+            break;
+        size_t quote_end = body.find('"', quote_start + 1);
+        if (quote_end == std::string::npos || quote_end > array_end)
+            break;
+
+        result.insert(body.substr(quote_start + 1, quote_end - quote_start - 1));
+        pos = quote_end + 1;
+    }
+
+    return result;
+}
+
+bool http_check_have(const std::string &base_url, const std::vector<std::string> &commit_hashes, const std::vector<std::string> &object_hashes, std::set<std::string> &have_commits, std::set<std::string> &have_objects)
+{
+    std::string host;
+    int port;
+    if (!parse_base_url(base_url, host, port))
+        return false;
+
+    std::ostringstream json;
+    json << "{\"commit_hashes\":[";
+    for (size_t i = 0; i < commit_hashes.size(); ++i)
+    {
+        json << "\"" << commit_hashes[i] << "\"";
+        if (i + 1 < commit_hashes.size())
+            json << ",";
+    }
+    json << "],\"object_hashes\":[";
+    for (size_t i = 0; i < object_hashes.size(); ++i)
+    {
+        json << "\"" << object_hashes[i] << "\"";
+        if (i + 1 < object_hashes.size())
+            json << ",";
+    }
+    json << "]}";
+
+    httplib::Client cli(host, port);
+    auto res = cli.Post("/have", json.str(), "application/json");
+
+    if (!res || res->status != 200)
+        return false;
+
+    have_commits = parse_json_string_array(res->body, "have_commits");
+    have_objects = parse_json_string_array(res->body, "have_objects");
+
+    return true;
 }

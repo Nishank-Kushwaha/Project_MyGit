@@ -2,6 +2,7 @@
 #include <string>
 #include <vector>
 #include <utility>
+#include <set>
 
 bool is_http_url(const std::string &url);
 
@@ -26,3 +27,8 @@ int http_fetch_commits(const std::string &base_url, const std::string &start_has
 // Only sends commits/objects the remote doesn't already have (based on remote's current tip).
 // Returns: 0 = success, 1 = non-fast-forward rejected by server, 2 = network/other failure.
 int http_push_branch(const std::string &base_url, const std::string &branch, const std::string &local_tip);
+
+// Asks the remote which of the given candidate commit/object hashes it already has.
+// Fills have_commits / have_objects with the subset the server reports owning.
+// Returns false on connection failure (outputs left untouched).
+bool http_check_have(const std::string &base_url, const std::vector<std::string> &commit_hashes, const std::vector<std::string> &object_hashes, std::set<std::string> &have_commits, std::set<std::string> &have_objects);

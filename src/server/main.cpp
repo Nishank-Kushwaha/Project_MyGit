@@ -65,6 +65,44 @@ static std::string json_extract_string(const std::string &body, const std::strin
     return body.substr(val_start, val_end - val_start);
 }
 
+// Extracts a JSON array of strings: "key":["a","b","c"] starting search at `from`.
+// Returns the list of strings found, and sets end_pos to just after the closing ].
+static std::vector<std::string> json_extract_string_array(const std::string &body, const std::string &key, size_t from, size_t &end_pos)
+{
+    std::vector<std::string> result;
+    std::string needle = "\"" + key + "\":[";
+    size_t key_pos = body.find(needle, from);
+    if (key_pos == std::string::npos)
+    {
+        end_pos = std::string::npos;
+        return result;
+    }
+
+    size_t pos = key_pos + needle.size();
+    size_t array_end = body.find(']', pos);
+    if (array_end == std::string::npos)
+    {
+        end_pos = std::string::npos;
+        return result;
+    }
+
+    while (pos < array_end)
+    {
+        size_t quote_start = body.find('"', pos);
+        if (quote_start == std::string::npos || quote_start > array_end)
+            break;
+        size_t quote_end = body.find('"', quote_start + 1);
+        if (quote_end == std::string::npos || quote_end > array_end)
+            break;
+
+        result.push_back(body.substr(quote_start + 1, quote_end - quote_start - 1));
+        pos = quote_end + 1;
+    }
+
+    end_pos = array_end + 1;
+    return result;
+}
+
 void write_raw_object(const std::string &hash, const std::string &raw_bytes)
 {
     if (object_exists(hash))
@@ -319,6 +357,56 @@ int main(int argc, char *argv[])
         std::ostringstream resp;
         resp << "{\"branch\":\"" << branch << "\",\"new_tip\":\"" << new_tip << "\",\"status\":\"ok\"}";
         res.set_content(resp.str(), "application/json"); });
+
+    // ---------------------------------------------------------------
+    // POST /have  ->  given candidate commit/object hashes, report which ones
+    // the server already has, so the client can skip sending them.
+    // Body: {"commit_hashes":["...","..."],"object_hashes":["...","..."]}
+    // Response: {"have_commits":["..."],"have_objects":["..."]}
+    // ---------------------------------------------------------------
+    svr.Post("/have", [](const httplib::Request &req, httplib::Response &res)
+             {
+        const std::string &body = req.body;
+
+        size_t pos_after_commits;
+        std::vector<std::string> commit_hashes = json_extract_string_array(body, "commit_hashes", 0, pos_after_commits);
+
+        size_t pos_after_objects;
+        std::vector<std::string> object_hashes = json_extract_string_array(body, "object_hashes", 0, pos_after_objects);
+
+        std::vector<std::string> have_commits;
+        for (const auto &hash : commit_hashes)
+        {
+            fs::path metadata_path = fs::path(".my_git/commits") / hash / "metadata";
+            if (fs::exists(metadata_path))
+                have_commits.push_back(hash);
+        }
+
+        std::vector<std::string> have_objects;
+        for (const auto &hash : object_hashes)
+        {
+            if (object_exists(hash))
+                have_objects.push_back(hash);
+        }
+
+        std::ostringstream json;
+        json << "{\"have_commits\":[";
+        for (size_t i = 0; i < have_commits.size(); ++i)
+        {
+            json << "\"" << have_commits[i] << "\"";
+            if (i + 1 < have_commits.size())
+                json << ",";
+        }
+        json << "],\"have_objects\":[";
+        for (size_t i = 0; i < have_objects.size(); ++i)
+        {
+            json << "\"" << have_objects[i] << "\"";
+            if (i + 1 < have_objects.size())
+                json << ",";
+        }
+        json << "]}";
+
+        res.set_content(json.str(), "application/json"); });
 
     std::cout << "my_git server listening on port " << port << "\n";
     std::cout << "Serving repository: " << repo_root_abs << "\n";
