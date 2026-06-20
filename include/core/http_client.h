@@ -21,3 +21,8 @@ std::string http_get_object(const std::string &base_url, const std::string &hash
 // Walks parent/parent2 links starting at start_hash, skipping anything already present locally.
 // Returns the number of new commit objects written.
 int http_fetch_commits(const std::string &base_url, const std::string &start_hash);
+
+// Pushes the local commit chain starting at local_tip to the remote's <branch>, over HTTP.
+// Only sends commits/objects the remote doesn't already have (based on remote's current tip).
+// Returns: 0 = success, 1 = non-fast-forward rejected by server, 2 = network/other failure.
+int http_push_branch(const std::string &base_url, const std::string &branch, const std::string &local_tip);

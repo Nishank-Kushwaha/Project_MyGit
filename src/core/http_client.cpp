@@ -1,11 +1,14 @@
 #include "core/http_client.h"
 #include "core/object_store.h"
+#include "core/commits.h"
 #include "utils/file_io.h"
+#include "utils/base64.h"
 #include "third_party/httplib.h"
 #include <filesystem>
 #include <sstream>
 #include <iostream>
 #include <set>
+#include <algorithm>
 
 namespace fs = std::filesystem;
 
@@ -242,4 +245,191 @@ int http_fetch_commits(const std::string &base_url, const std::string &start_has
     }
 
     return copied;
+}
+
+// ---------------------------------------------------------------------
+// HTTP push
+// ---------------------------------------------------------------------
+
+// Escapes a string for safe embedding inside a JSON "..." value:
+// backslash, double-quote, and newline are the only characters our
+// metadata/content can realistically contain that need escaping here.
+static std::string json_escape(const std::string &input)
+{
+    std::string out;
+    out.reserve(input.size());
+    for (char c : input)
+    {
+        switch (c)
+        {
+        case '\\':
+            out += "\\\\";
+            break;
+        case '"':
+            out += "\\\"";
+            break;
+        case '\n':
+            out += "\\n";
+            break;
+        case '\r':
+            break; // drop CR, keep LF only
+        default:
+            out += c;
+        }
+    }
+    return out;
+}
+
+// Recursively collects every blob/tree object hash referenced by a tree
+// that is NOT already known to be present on the remote (tracked via `known`).
+static void collect_tree_objects(const std::string &tree_hash, std::set<std::string> &known, std::vector<std::string> &to_send)
+{
+    if (tree_hash.empty() || known.count(tree_hash))
+        return;
+    known.insert(tree_hash);
+    to_send.push_back(tree_hash);
+
+    std::string full = read_object(tree_hash);
+    size_t null_pos = full.find('\0');
+    if (null_pos == std::string::npos)
+        return;
+    std::string tree_content = full.substr(null_pos + 1);
+
+    std::istringstream iss(tree_content);
+    std::string line;
+    while (std::getline(iss, line))
+    {
+        if (line.empty())
+            continue;
+        std::istringstream ls(line);
+        std::string mode, type, hash;
+        ls >> mode >> type >> hash;
+
+        if (type == "blob")
+        {
+            if (!known.count(hash))
+            {
+                known.insert(hash);
+                to_send.push_back(hash);
+            }
+        }
+        else if (type == "tree")
+        {
+            collect_tree_objects(hash, known, to_send);
+        }
+    }
+}
+
+int http_push_branch(const std::string &base_url, const std::string &branch, const std::string &local_tip)
+{
+    std::string host;
+    int port;
+    if (!parse_base_url(base_url, host, port))
+        return 2;
+
+    // Find out what the remote already has, so we don't resend it.
+    std::string remote_tip = http_get_ref(base_url, branch);
+
+    std::set<std::string> known_commits;
+    if (!remote_tip.empty())
+        known_commits = get_ancestors(remote_tip);
+
+    // Walk local commits backward from local_tip, stopping at anything the remote already has.
+    std::vector<std::string> commits_to_send;
+    std::set<std::string> known_objects; // objects already collected for sending (dedup within this push)
+    std::vector<std::string> objects_to_send;
+
+    std::vector<std::string> frontier = {local_tip};
+    std::set<std::string> visited_commits;
+
+    while (!frontier.empty())
+    {
+        std::string hash = frontier.back();
+        frontier.pop_back();
+
+        if (hash.empty() || visited_commits.count(hash) || known_commits.count(hash))
+            continue;
+        visited_commits.insert(hash);
+
+        std::string metadata = read_file(fs::path(".my_git/commits") / hash / "metadata");
+        if (metadata.empty())
+            continue;
+
+        commits_to_send.push_back(hash);
+
+        std::istringstream iss(metadata);
+        std::string line, parent, parent2, tree_hash;
+        while (std::getline(iss, line))
+        {
+            if (line.rfind("parent2:", 0) == 0)
+                parent2 = trim_nl(line.substr(9));
+            else if (line.rfind("parent:", 0) == 0)
+                parent = trim_nl(line.substr(8));
+            else if (line.rfind("tree:", 0) == 0)
+                tree_hash = trim_nl(line.substr(6));
+        }
+
+        if (!tree_hash.empty())
+            collect_tree_objects(tree_hash, known_objects, objects_to_send);
+
+        if (!parent.empty())
+            frontier.push_back(parent);
+        if (!parent2.empty())
+            frontier.push_back(parent2);
+    }
+
+    if (commits_to_send.empty())
+    {
+        // Nothing new — still attempt the ref update in case remote_tip == local_tip already
+        // (caller decides what message to print; we just report success here)
+        return 0;
+    }
+
+    // Build JSON body. Client sends commits in "newest first" order (frontier search above
+    // doesn't guarantee that ordering perfectly, but the server only reads the FIRST commit's
+    // hash as the new tip — so we put local_tip first explicitly).
+    std::ostringstream json;
+    json << "{\"branch\":\"" << json_escape(branch) << "\",";
+
+    json << "\"objects\":[";
+    for (size_t i = 0; i < objects_to_send.size(); ++i)
+    {
+        const std::string &hash = objects_to_send[i];
+        fs::path obj_path = fs::path(".my_git/objects") / hash.substr(0, 2) / hash.substr(2);
+        std::string raw = read_file(obj_path); // exact on-disk bytes, same as GET /object/<hash>
+
+        json << "{\"hash\":\"" << hash << "\",\"data_base64\":\""
+             << base64_encode(raw) << "\"}";
+        if (i + 1 < objects_to_send.size())
+            json << ",";
+    }
+    json << "],";
+
+    json << "\"commits\":[";
+    // local_tip first, guaranteed
+    auto it = std::find(commits_to_send.begin(), commits_to_send.end(), local_tip);
+    if (it != commits_to_send.end())
+        std::iter_swap(commits_to_send.begin(), it);
+
+    for (size_t i = 0; i < commits_to_send.size(); ++i)
+    {
+        std::string metadata = read_file(fs::path(".my_git/commits") / commits_to_send[i] / "metadata");
+        json << "{\"hash\":\"" << commits_to_send[i] << "\",\"metadata\":\""
+             << json_escape(metadata) << "\"}";
+        if (i + 1 < commits_to_send.size())
+            json << ",";
+    }
+    json << "]}";
+
+    httplib::Client cli(host, port);
+    auto res = cli.Post("/push", json.str(), "application/json");
+
+    if (!res)
+        return 2;
+    if (res->status == 409)
+        return 1;
+    if (res->status != 200)
+        return 2;
+
+    return 0;
 }

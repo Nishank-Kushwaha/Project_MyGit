@@ -45,13 +45,6 @@ void cmd_push(const std::string &remote_name, const std::string &branch_name)
         return;
     }
 
-    fs::path remote_root = remote_path;
-    if (!fs::exists(remote_root / ".my_git"))
-    {
-        std::cout << "Error: '" << remote_path << "' is not a my_git repository\n";
-        return;
-    }
-
     fs::path local_ref = fs::path(".my_git/refs") / branch_name;
     if (!fs::exists(local_ref))
     {
@@ -59,7 +52,48 @@ void cmd_push(const std::string &remote_name, const std::string &branch_name)
         return;
     }
 
-    std::string local_hash = read_file(local_ref);
+    std::string local_hash = trim_nl(read_file(local_ref));
+
+    // ---------------------------------------------------------------
+    // HTTP remote path
+    // ---------------------------------------------------------------
+    if (is_http_url(remote_path))
+    {
+        std::string remote_tip = http_get_ref(remote_path, branch_name);
+
+        if (!remote_tip.empty() && remote_tip == local_hash)
+        {
+            std::cout << "Already up to date.\n";
+            return;
+        }
+
+        int result = http_push_branch(remote_path, branch_name, local_hash);
+
+        if (result == 1)
+        {
+            std::cout << "Error: push rejected (non-fast-forward). Remote has commits you don't have.\n";
+            return;
+        }
+        if (result == 2)
+        {
+            std::cout << "Error: could not reach '" << remote_path << "'\n";
+            return;
+        }
+
+        std::cout << "Pushed '" << branch_name << "' to '" << remote_name << "' (http)\n";
+        return;
+    }
+
+    // ---------------------------------------------------------------
+    // Filesystem remote path (unchanged)
+    // ---------------------------------------------------------------
+    fs::path remote_root = remote_path;
+    if (!fs::exists(remote_root / ".my_git"))
+    {
+        std::cout << "Error: '" << remote_path << "' is not a my_git repository\n";
+        return;
+    }
+
     fs::path remote_ref = remote_root / ".my_git/refs" / branch_name;
 
     // Fast-forward check

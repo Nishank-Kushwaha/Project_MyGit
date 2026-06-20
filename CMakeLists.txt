@@ -12,6 +12,7 @@ add_executable(my_git
     src/utils/sha1.cpp
     src/utils/file_io.cpp
     src/utils/time.cpp
+    src/utils/base64.cpp
 
     src/core/ignore.cpp
     src/core/refs.cpp
@@ -37,7 +38,6 @@ add_executable(my_git
     src/commands/help.cpp
 )
 target_link_libraries(my_git z)
-
 find_package(Threads REQUIRED)
 target_link_libraries(my_git Threads::Threads)
 if (WIN32)
@@ -46,7 +46,16 @@ endif()
 
 add_executable(my_git_server
     src/server/main.cpp
+
+    src/utils/sha1.cpp
+    src/utils/file_io.cpp
+    src/utils/time.cpp
+    src/utils/base64.cpp
+
+    src/core/object_store.cpp
+    src/core/commits.cpp
 )
+target_link_libraries(my_git_server z)
 target_link_libraries(my_git_server Threads::Threads)
 if (WIN32)
     target_link_libraries(my_git_server ws2_32 crypt32)
