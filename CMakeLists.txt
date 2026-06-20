@@ -19,6 +19,7 @@ add_executable(my_git
     src/core/diff_engine.cpp
     src/core/commits.cpp
     src/core/remote.cpp
+    src/core/http_client.cpp
 
     src/commands/init.cpp
     src/commands/add.cpp
@@ -37,10 +38,15 @@ add_executable(my_git
 )
 target_link_libraries(my_git z)
 
+find_package(Threads REQUIRED)
+target_link_libraries(my_git Threads::Threads)
+if (WIN32)
+    target_link_libraries(my_git ws2_32 crypt32)
+endif()
+
 add_executable(my_git_server
     src/server/main.cpp
 )
-find_package(Threads REQUIRED)
 target_link_libraries(my_git_server Threads::Threads)
 if (WIN32)
     target_link_libraries(my_git_server ws2_32 crypt32)

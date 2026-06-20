@@ -1,0 +1,245 @@
+#include "core/http_client.h"
+#include "core/object_store.h"
+#include "utils/file_io.h"
+#include "third_party/httplib.h"
+#include <filesystem>
+#include <sstream>
+#include <iostream>
+#include <set>
+
+namespace fs = std::filesystem;
+
+bool is_http_url(const std::string &url)
+{
+    return url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0;
+}
+
+// Splits "http://host:port" into scheme, host, port. Defaults to port 80 if missing.
+static bool parse_base_url(const std::string &base_url, std::string &host, int &port)
+{
+    std::string rest = base_url;
+    if (rest.rfind("http://", 0) == 0)
+        rest = rest.substr(7);
+    else if (rest.rfind("https://", 0) == 0)
+        rest = rest.substr(8);
+
+    // strip any trailing slash or path
+    size_t slash = rest.find('/');
+    if (slash != std::string::npos)
+        rest = rest.substr(0, slash);
+
+    size_t colon = rest.find(':');
+    if (colon == std::string::npos)
+    {
+        host = rest;
+        port = 80;
+    }
+    else
+    {
+        host = rest.substr(0, colon);
+        port = std::atoi(rest.substr(colon + 1).c_str());
+    }
+    return !host.empty();
+}
+
+std::vector<std::pair<std::string, std::string>> http_get_refs(const std::string &base_url)
+{
+    std::vector<std::pair<std::string, std::string>> result;
+
+    std::string host;
+    int port;
+    if (!parse_base_url(base_url, host, port))
+        return result;
+
+    httplib::Client cli(host, port);
+    auto res = cli.Get("/refs");
+    if (!res || res->status != 200)
+        return result;
+
+    // minimal JSON parse: [{"name":"main","hash":"abc123"}, ...]
+    const std::string &body = res->body;
+    size_t pos = 0;
+    while (true)
+    {
+        size_t name_key = body.find("\"name\":\"", pos);
+        if (name_key == std::string::npos)
+            break;
+        size_t name_start = name_key + 8;
+        size_t name_end = body.find('"', name_start);
+        std::string name = body.substr(name_start, name_end - name_start);
+
+        size_t hash_key = body.find("\"hash\":\"", name_end);
+        size_t hash_start = hash_key + 8;
+        size_t hash_end = body.find('"', hash_start);
+        std::string hash = body.substr(hash_start, hash_end - hash_start);
+
+        result.push_back({name, hash});
+        pos = hash_end + 1;
+    }
+
+    return result;
+}
+
+std::string http_get_ref(const std::string &base_url, const std::string &ref_name)
+{
+    std::string host;
+    int port;
+    if (!parse_base_url(base_url, host, port))
+        return "";
+
+    httplib::Client cli(host, port);
+    auto res = cli.Get("/refs/" + ref_name);
+    if (!res || res->status != 200)
+        return "";
+
+    return res->body;
+}
+
+std::string http_get_commit_metadata(const std::string &base_url, const std::string &hash)
+{
+    std::string host;
+    int port;
+    if (!parse_base_url(base_url, host, port))
+        return "";
+
+    httplib::Client cli(host, port);
+    auto res = cli.Get("/commit/" + hash);
+    if (!res || res->status != 200)
+        return "";
+
+    return res->body;
+}
+
+std::string http_get_object(const std::string &base_url, const std::string &hash)
+{
+    std::string host;
+    int port;
+    if (!parse_base_url(base_url, host, port))
+        return "";
+
+    httplib::Client cli(host, port);
+    auto res = cli.Get("/object/" + hash);
+    if (!res || res->status != 200)
+        return "";
+
+    return res->body;
+}
+
+// Writes raw on-disk object bytes directly into .my_git/objects/<aa>/<rest> without
+// re-compressing (the server already sent the exact compressed on-disk format).
+static void write_raw_object(const std::string &hash, const std::string &raw_bytes)
+{
+    if (object_exists(hash))
+        return;
+
+    fs::path obj_dir = fs::path(".my_git/objects") / hash.substr(0, 2);
+    fs::path obj_path = obj_dir / hash.substr(2);
+
+    fs::create_directories(obj_dir);
+    write_file(obj_path, raw_bytes);
+}
+
+// Recursively fetches every blob/tree object referenced by a tree, starting at tree_hash.
+static void fetch_tree_recursive(const std::string &base_url, const std::string &tree_hash, std::set<std::string> &visited)
+{
+    if (tree_hash.empty() || visited.count(tree_hash))
+        return;
+    visited.insert(tree_hash);
+
+    if (!object_exists(tree_hash))
+    {
+        std::string raw = http_get_object(base_url, tree_hash);
+        if (raw.empty())
+            return;
+        write_raw_object(tree_hash, raw);
+    }
+
+    // Now read it back locally (we just wrote it, or it already existed) to parse entries.
+    std::string full = read_object(tree_hash);
+    size_t null_pos = full.find('\0');
+    if (null_pos == std::string::npos)
+        return;
+    std::string tree_content = full.substr(null_pos + 1);
+
+    std::istringstream iss(tree_content);
+    std::string line;
+    while (std::getline(iss, line))
+    {
+        if (line.empty())
+            continue;
+        std::istringstream ls(line);
+        std::string mode, type, hash;
+        ls >> mode >> type >> hash;
+
+        if (type == "blob")
+        {
+            if (!object_exists(hash) && !visited.count(hash))
+            {
+                visited.insert(hash);
+                std::string raw = http_get_object(base_url, hash);
+                if (!raw.empty())
+                    write_raw_object(hash, raw);
+            }
+        }
+        else if (type == "tree")
+        {
+            fetch_tree_recursive(base_url, hash, visited);
+        }
+    }
+}
+
+int http_fetch_commits(const std::string &base_url, const std::string &start_hash)
+{
+    int copied = 0;
+    std::set<std::string> visited_objects;
+    std::string current = start_hash;
+
+    while (!current.empty())
+    {
+        fs::path commit_dir = fs::path(".my_git/commits") / current;
+
+        bool already_have = fs::exists(commit_dir / "metadata");
+
+        std::string metadata;
+        if (already_have)
+        {
+            metadata = read_file(commit_dir / "metadata");
+        }
+        else
+        {
+            metadata = http_get_commit_metadata(base_url, current);
+            if (metadata.empty())
+                break;
+
+            fs::create_directories(commit_dir);
+            write_file(commit_dir / "metadata", metadata);
+            copied++;
+        }
+
+        // Parse parent / parent2 / tree from metadata
+        std::istringstream iss(metadata);
+        std::string line, parent, parent2, tree_hash;
+        while (std::getline(iss, line))
+        {
+            if (line.rfind("parent2:", 0) == 0)
+                parent2 = trim_nl(line.substr(9));
+            else if (line.rfind("parent:", 0) == 0)
+                parent = trim_nl(line.substr(8));
+            else if (line.rfind("tree:", 0) == 0)
+                tree_hash = trim_nl(line.substr(6));
+        }
+
+        if (!tree_hash.empty())
+            fetch_tree_recursive(base_url, tree_hash, visited_objects);
+
+        if (!parent2.empty())
+            copied += http_fetch_commits(base_url, parent2);
+
+        if (already_have)
+            break; // we've reached a commit we already had — ancestors are guaranteed present too
+
+        current = parent;
+    }
+
+    return copied;
+}

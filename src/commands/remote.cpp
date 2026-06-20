@@ -12,17 +12,28 @@
 #include <set>
 #include <map>
 #include <vector>
+#include "core/http_client.h"
 
 namespace fs = std::filesystem;
 
 void cmd_remote_add(const std::string &name, const std::string &path)
 {
     std::string config = read_file(".my_git/config");
-    std::string abs_path = fs::absolute(fs::path(path)).string();
-    std::replace(abs_path.begin(), abs_path.end(), '\\', '/');
-    config += "remote." + name + ".url=" + abs_path + "\n";
+
+    std::string url;
+    if (path.rfind("http://", 0) == 0 || path.rfind("https://", 0) == 0)
+    {
+        url = path; // HTTP URLs are used as-is, no path resolution
+    }
+    else
+    {
+        url = fs::absolute(fs::path(path)).string();
+        std::replace(url.begin(), url.end(), '\\', '/');
+    }
+
+    config += "remote." + name + ".url=" + url + "\n";
     write_file(".my_git/config", config);
-    std::cout << "Added remote '" << name << "' -> " << abs_path << "\n";
+    std::cout << "Added remote '" << name << "' -> " << url << "\n";
 }
 
 void cmd_push(const std::string &remote_name, const std::string &branch_name)
@@ -91,6 +102,54 @@ void cmd_fetch(const std::string &remote_name)
         return;
     }
 
+    // ---------------------------------------------------------------
+    // HTTP remote path
+    // ---------------------------------------------------------------
+    if (is_http_url(remote_path))
+    {
+        auto refs = http_get_refs(remote_path);
+        if (refs.empty())
+        {
+            std::cout << "Error: could not reach '" << remote_path << "' or no refs found\n";
+            return;
+        }
+
+        fs::path local_tracking_dir = fs::path(".my_git/refs/remotes") / remote_name;
+        fs::create_directories(local_tracking_dir);
+
+        int total_copied = 0;
+        int branches_updated = 0;
+
+        for (const auto &[branch_name, remote_hash] : refs)
+        {
+            if (remote_hash.empty())
+                continue;
+
+            // branch_name may contain "/" (e.g. remotes/origin/main on the far side) — keep as-is
+            fs::path tracking_ref = local_tracking_dir / branch_name;
+            fs::create_directories(tracking_ref.parent_path());
+
+            total_copied += http_fetch_commits(remote_path, remote_hash);
+
+            std::string old_hash = fs::exists(tracking_ref) ? read_file(tracking_ref) : "";
+            if (old_hash != remote_hash)
+            {
+                write_file(tracking_ref, remote_hash);
+                branches_updated++;
+                std::cout << "  " << remote_name << "/" << branch_name
+                          << "  " << (old_hash.empty() ? "(new)" : old_hash.substr(0, 7))
+                          << " -> " << remote_hash.substr(0, 7) << "\n";
+            }
+        }
+
+        std::cout << "Fetched from '" << remote_name << "' (http): " << branches_updated
+                  << " branch(es) updated, " << total_copied << " new commit object(s)\n";
+        return;
+    }
+
+    // ---------------------------------------------------------------
+    // Filesystem remote path (unchanged)
+    // ---------------------------------------------------------------
     fs::path remote_root = remote_path;
     if (!fs::exists(remote_root / ".my_git"))
     {

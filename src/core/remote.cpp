@@ -17,6 +17,10 @@ std::string get_remote_url(const std::string &name)
         if (line.rfind(prefix, 0) == 0)
         {
             std::string url = trim_nl(line.substr(prefix.size()));
+
+            if (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0)
+                return url; // HTTP URLs are used as-is, no path resolution
+
             fs::path p(url);
             if (p.is_relative())
                 url = fs::absolute(p).string();
