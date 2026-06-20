@@ -35,5 +35,13 @@ add_executable(my_git
     src/commands/plumbing.cpp
     src/commands/help.cpp
 )
-
 target_link_libraries(my_git z)
+
+add_executable(my_git_server
+    src/server/main.cpp
+)
+find_package(Threads REQUIRED)
+target_link_libraries(my_git_server Threads::Threads)
+if (WIN32)
+    target_link_libraries(my_git_server ws2_32 crypt32)
+endif()
