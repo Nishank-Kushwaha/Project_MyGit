@@ -15,7 +15,6 @@ namespace fs = std::filesystem;
 
 std::string g_repo_path;
 
-// Walk .my_git/refs/ recursively, emitting one JSON object per branch ref file found.
 void list_refs_recursive(const fs::path &dir, const std::string &prefix, std::vector<std::string> &entries)
 {
     if (!fs::exists(dir))
@@ -43,13 +42,6 @@ void list_refs_recursive(const fs::path &dir, const std::string &prefix, std::ve
     }
 }
 
-// ---------------------------------------------------------------------
-// Minimal hand-rolled JSON helpers for parsing the /push request body.
-// Not a general-purpose parser — relies on the exact shape the client sends.
-// ---------------------------------------------------------------------
-
-// Finds the string value of a "key":"value" pair starting the search at `from`.
-// Returns the position just after the closing quote via end_pos, or std::string::npos if not found.
 static std::string json_extract_string(const std::string &body, const std::string &key, size_t from, size_t &end_pos)
 {
     std::string needle = "\"" + key + "\":\"";
@@ -65,8 +57,6 @@ static std::string json_extract_string(const std::string &body, const std::strin
     return body.substr(val_start, val_end - val_start);
 }
 
-// Extracts a JSON array of strings: "key":["a","b","c"] starting search at `from`.
-// Returns the list of strings found, and sets end_pos to just after the closing ].
 static std::vector<std::string> json_extract_string_array(const std::string &body, const std::string &key, size_t from, size_t &end_pos)
 {
     std::vector<std::string> result;
@@ -135,25 +125,17 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    // Capture the absolute path BEFORE changing CWD, so the startup message
-    // and any future use of repo_root aren't resolved relative to itself.
     std::string repo_root_abs = fs::absolute(repo_root).string();
 
-    // All object_store / commits functions use paths relative to CWD,
-    // so we run the server with CWD set to the repo root.
     fs::current_path(repo_root);
 
     httplib::Server svr;
 
-    // ---------------------------------------------------------------
     // GET /  ->  simple liveness check
-    // ---------------------------------------------------------------
     svr.Get("/", [](const httplib::Request &, httplib::Response &res)
             { res.set_content("Hello from my_git server", "text/plain"); });
 
-    // ---------------------------------------------------------------
     // GET /refs  ->  JSON array of every branch ref
-    // ---------------------------------------------------------------
     svr.Get("/refs", [](const httplib::Request &, httplib::Response &res)
             {
         std::vector<std::string> entries;
@@ -171,9 +153,7 @@ int main(int argc, char *argv[])
 
         res.set_content(json.str(), "application/json"); });
 
-    // ---------------------------------------------------------------
     // GET /refs/<name>  ->  raw commit hash text
-    // ---------------------------------------------------------------
     svr.Get(R"(/refs/(.+))", [](const httplib::Request &req, httplib::Response &res)
             {
         std::string ref_name = req.matches[1];
@@ -189,9 +169,7 @@ int main(int argc, char *argv[])
 
         res.set_content(hash, "text/plain"); });
 
-    // ---------------------------------------------------------------
     // GET /commit/<hash>  ->  raw metadata text of that commit
-    // ---------------------------------------------------------------
     svr.Get(R"(/commit/(.+))", [](const httplib::Request &req, httplib::Response &res)
             {
         std::string hash = req.matches[1];
@@ -207,9 +185,7 @@ int main(int argc, char *argv[])
 
         res.set_content(metadata, "text/plain"); });
 
-    // ---------------------------------------------------------------
     // GET /object/<hash>  ->  raw on-disk bytes of that object
-    // ---------------------------------------------------------------
     svr.Get(R"(/object/(.+))", [](const httplib::Request &req, httplib::Response &res)
             {
         std::string hash = req.matches[1];
@@ -232,11 +208,7 @@ int main(int argc, char *argv[])
 
         res.set_content(raw, "application/octet-stream"); });
 
-    // ---------------------------------------------------------------
     // POST /push  ->  accept commits + objects, update a branch ref
-    // Body: {"branch":"main","commits":[{"hash":"...","metadata":"..."}],
-    //        "objects":[{"hash":"...","data_base64":"..."}]}
-    // ---------------------------------------------------------------
     svr.Post("/push", [](const httplib::Request &req, httplib::Response &res)
              {
         const std::string &body = req.body;
@@ -358,12 +330,7 @@ int main(int argc, char *argv[])
         resp << "{\"branch\":\"" << branch << "\",\"new_tip\":\"" << new_tip << "\",\"status\":\"ok\"}";
         res.set_content(resp.str(), "application/json"); });
 
-    // ---------------------------------------------------------------
-    // POST /have  ->  given candidate commit/object hashes, report which ones
-    // the server already has, so the client can skip sending them.
-    // Body: {"commit_hashes":["...","..."],"object_hashes":["...","..."]}
-    // Response: {"have_commits":["..."],"have_objects":["..."]}
-    // ---------------------------------------------------------------
+    // POST /have  ->  given candidate commit/object hashes, report which ones the server already has, so the client can skip sending them.
     svr.Post("/have", [](const httplib::Request &req, httplib::Response &res)
              {
         const std::string &body = req.body;

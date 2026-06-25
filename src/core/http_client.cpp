@@ -17,7 +17,6 @@ bool is_http_url(const std::string &url)
     return url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0;
 }
 
-// Splits "http://host:port" into scheme, host, port. Defaults to port 80 if missing.
 static bool parse_base_url(const std::string &base_url, std::string &host, int &port)
 {
     std::string rest = base_url;
@@ -128,8 +127,6 @@ std::string http_get_object(const std::string &base_url, const std::string &hash
     return res->body;
 }
 
-// Writes raw on-disk object bytes directly into .my_git/objects/<aa>/<rest> without
-// re-compressing (the server already sent the exact compressed on-disk format).
 static void write_raw_object(const std::string &hash, const std::string &raw_bytes)
 {
     if (object_exists(hash))
@@ -142,7 +139,6 @@ static void write_raw_object(const std::string &hash, const std::string &raw_byt
     write_file(obj_path, raw_bytes);
 }
 
-// Recursively fetches every blob/tree object referenced by a tree, starting at tree_hash.
 static void fetch_tree_recursive(const std::string &base_url, const std::string &tree_hash, std::set<std::string> &visited)
 {
     if (tree_hash.empty() || visited.count(tree_hash))
@@ -247,13 +243,6 @@ int http_fetch_commits(const std::string &base_url, const std::string &start_has
     return copied;
 }
 
-// ---------------------------------------------------------------------
-// HTTP push
-// ---------------------------------------------------------------------
-
-// Escapes a string for safe embedding inside a JSON "..." value:
-// backslash, double-quote, and newline are the only characters our
-// metadata/content can realistically contain that need escaping here.
 static std::string json_escape(const std::string &input)
 {
     std::string out;
@@ -280,8 +269,6 @@ static std::string json_escape(const std::string &input)
     return out;
 }
 
-// Recursively collects every blob/tree object hash referenced by a tree
-// that is NOT already known to be present on the remote (tracked via `known`).
 static void collect_tree_objects(const std::string &tree_hash, std::set<std::string> &known, std::vector<std::string> &to_send)
 {
     if (tree_hash.empty() || known.count(tree_hash))
@@ -380,15 +367,9 @@ int http_push_branch(const std::string &base_url, const std::string &branch, con
 
     if (commits_to_send.empty())
     {
-        // Nothing new — still attempt the ref update in case remote_tip == local_tip already
-        // (caller decides what message to print; we just report success here)
         return 0;
     }
 
-    // ---------------------------------------------------------------
-    // Smart transfer: ask the remote what it already has, and trim
-    // commits_to_send / objects_to_send down to the genuine delta.
-    // ---------------------------------------------------------------
     std::set<std::string> have_commits, have_objects;
     bool have_check_ok = http_check_have(base_url, commits_to_send, objects_to_send, have_commits, have_objects);
 
@@ -405,8 +386,6 @@ int http_push_branch(const std::string &base_url, const std::string &branch, con
                 filtered_objects.push_back(h);
 
         // local_tip's own commit entry must always be sent even if somehow
-        // already reported as "have" (e.g. re-push of same tip with new branch name)
-        // since the server needs at least one commit to determine the new ref target.
         if (filtered_commits.empty() &&
             std::find(commits_to_send.begin(), commits_to_send.end(), local_tip) != commits_to_send.end())
         {
@@ -416,13 +395,7 @@ int http_push_branch(const std::string &base_url, const std::string &branch, con
         commits_to_send = filtered_commits;
         objects_to_send = filtered_objects;
     }
-    // if the /have check fails (server unreachable for that call, or older server
-    // without /have support), fall through and send the full candidate set as before —
-    // correctness is preserved, we just lose the bandwidth optimization for this push.
 
-    // Build JSON body. Client sends commits in "newest first" order (frontier search above
-    // doesn't guarantee that ordering perfectly, but the server only reads the FIRST commit's
-    // hash as the new tip — so we put local_tip first explicitly).
     std::ostringstream json;
     json << "{\"branch\":\"" << json_escape(branch) << "\",";
 
@@ -469,7 +442,6 @@ int http_push_branch(const std::string &base_url, const std::string &branch, con
     return 0;
 }
 
-// Parses a JSON array of strings from a response body: "key":["a","b"]
 static std::set<std::string> parse_json_string_array(const std::string &body, const std::string &key)
 {
     std::set<std::string> result;
